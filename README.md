@@ -150,11 +150,33 @@ proxy:
 
 Different applications can also use different domains on the same machine. Keep `service` names and proxy hostnames unique between applications.
 
-## Private images and secrets
+## Private images, environment, and secrets
 
 Authenticate Docker to private registries on every deployment host before deploying. Serve reads the host's standard Docker client configuration, including credential helpers, but does not provision credentials. See [Private registry access](docs/private-registry-access.md).
 
-Application secrets can be stored in `serve.secrets.yml` with SOPS and referenced through `env.secret`. Hosts that decrypt secrets must have SOPS and the appropriate decryption credentials installed.
+Applications and accessories accept plain environment values and SOPS-backed secrets:
+
+```yaml
+env:
+  plain:
+    RACK_ENV: production
+  secret:
+    - SECRET_KEY_BASE
+
+accessories:
+  postgres:
+    image: postgres:16-alpine
+    hosts:
+      - deploy@example.com
+    env:
+      plain:
+        POSTGRES_USER: app
+        POSTGRES_DB: app_production
+      secret:
+        - POSTGRES_PASSWORD
+```
+
+`env.plain` values are stored directly in Serve and Docker configuration. Names listed under `env.secret` are loaded from the SOPS-encrypted `serve.secrets.yml` next to `serve.yml`. Hosts that decrypt secrets must have SOPS and the appropriate decryption credentials installed.
 
 ## Documentation
 

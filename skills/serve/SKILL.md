@@ -177,6 +177,24 @@ Submit desired state to a running agent:
 serve agent apply ./desired.json --socket /run/serve/agent.sock
 ```
 
+## Environment and secrets
+
+Applications and accessories use the same environment schema:
+
+```yaml
+env:
+  plain:
+    LOG_LEVEL: info
+  secret:
+    - API_TOKEN
+```
+
+- Use `env.plain` for non-sensitive values stored directly in Serve and Docker configuration.
+- Use `env.secret` for names resolved from the SOPS-encrypted `serve.secrets.yml` beside `serve.yml`.
+- `env.clear` is not supported.
+- Accessory secrets must trigger the same encrypted-file delivery and host-side resolution as application secrets.
+- Environment secrets are ultimately stored in Docker's container environment and visible to privileged Docker users. File-mounted secrets are not implemented.
+
 ## Host prerequisites
 
 Host provisioning is intentionally out of scope. Docker, the Serve binary, the systemd unit, required directories, SOPS, and credentials must be installed and configured manually before remote deployment. Serve may validate prerequisites, but it must not install or provision them.
@@ -188,7 +206,7 @@ Host provisioning is intentionally out of scope. Docker, the Serve binary, the s
 - Docker is the runtime, not the orchestrator.
 - Systemd should only start the Serve agent, not individual app containers.
 - App/accessory containers are managed through the agent/reconciler.
-- Secrets are delivered via tmpfs env files; never put plaintext secrets on CLI args or in logs.
+- Plaintext secrets are materialized in tmpfs env files only while Docker creates app or accessory containers; never put them on CLI args or in logs.
 - Do not add host provisioning or installation behavior to `serve setup`.
 
 ## Package map

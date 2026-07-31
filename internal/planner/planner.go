@@ -128,7 +128,7 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 		Network:          network,
 		RetainContainers: retainContainers,
 	}
-	if len(cfg.Env.Secret) > 0 {
+	if config.HasEnvSecrets(cfg) {
 		state.SecretsFile = opts.SecretsFileContent
 	}
 	state.Proxy = ProxyRoute{
@@ -158,7 +158,7 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 				Command:       commandArgv(server.Command),
 				Replica:       replica,
 				Proxy:         role == appRole(cfg),
-				Env:           copyStringMap(cfg.Env.Clear),
+				Env:           copyStringMap(cfg.Env.Plain),
 				Healthcheck:   healthcheck(server.Healthcheck),
 				Restart:       restart(server.Restart),
 				Labels:        labels(cfg.Service, destination, role, opts.Version, replica, "app"),
@@ -166,7 +166,7 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 			if server.AppPort > 0 {
 				container.Ports = []Port{{Name: "http", ContainerPort: server.AppPort}}
 			}
-			applySecrets(&container, cfg, opts)
+			applySecrets(&container, cfg.Env, cfg.Secrets, opts)
 			container.Labels["serve.spec_hash"] = specHash(container, state.Network, state.SecretsFile)
 			state.Containers = append(state.Containers, container)
 		}
@@ -187,11 +187,13 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 			Restart:       restart(accessory.Restart),
 			Aliases:       append([]string(nil), accessory.Aliases...),
 			Volumes:       append([]string(nil), accessory.Volumes...),
+			Env:           copyStringMap(accessory.Env.Plain),
 			Labels:        labels(cfg.Service, destination, name, opts.Version, 1, "accessory"),
 		}
 		if accessory.InternalPort > 0 {
 			container.Ports = []Port{{Name: "tcp", ContainerPort: accessory.InternalPort}}
 		}
+		applySecrets(&container, accessory.Env, cfg.Secrets, opts)
 		container.Labels["serve.spec_hash"] = specHash(container, state.Network, state.SecretsFile)
 		state.Containers = append(state.Containers, container)
 	}
@@ -282,22 +284,22 @@ func appRole(cfg config.Config) string {
 	return "web"
 }
 
-func applySecrets(container *Container, cfg config.Config, opts Options) {
-	if len(cfg.Env.Secret) == 0 {
+func applySecrets(container *Container, env config.EnvConfig, secrets config.SecretsConfig, opts Options) {
+	if len(env.Secret) == 0 {
 		return
 	}
 
-	container.SecretNames = append([]string(nil), cfg.Env.Secret...)
+	container.SecretNames = append([]string(nil), env.Secret...)
 	container.SecretsRef = opts.SecretsRef
 	if container.SecretsRef == "" {
-		provider := cfg.Secrets.Provider
+		provider := secrets.Provider
 		if provider == "" {
 			provider = "sops"
 		}
 		container.SecretsRef = provider + ":serve.secrets.yml"
 	}
 
-	for _, name := range cfg.Env.Secret {
+	for _, name := range env.Secret {
 		ciphertext, ok := opts.SecretCiphertext[name]
 		if !ok {
 			continue

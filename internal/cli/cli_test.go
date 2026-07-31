@@ -589,6 +589,59 @@ env:
 	}
 }
 
+func TestRemoteDeployAppliesAccessoryEnvironmentAndSecrets(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "serve.yml")
+	if err := os.WriteFile(configPath, []byte(`service: my-app
+image: ghcr.io/acme/my-app
+destination: production
+accessories:
+  postgres:
+    image: postgres:16-alpine
+    hosts:
+      - app1.example.com
+    env:
+      plain:
+        POSTGRES_USER: app
+        POSTGRES_DB: app_production
+      secret:
+        - POSTGRES_PASSWORD
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	encryptedFile := "POSTGRES_PASSWORD: ENC[AES256_GCM,data:password-ciphertext]\nsops:\n  kms: []\n"
+	if err := os.WriteFile(filepath.Join(dir, "serve.secrets.yml"), []byte(encryptedFile), 0o644); err != nil {
+		t.Fatalf("write secrets file: %v", err)
+	}
+
+	ssh := &recordingSSHRunner{}
+	cmd := cli.New("v1.2.3-test", cli.WithSSHRunner(ssh))
+
+	exitCode := cmd.Run(context.Background(), []string{"deploy", "--config", configPath, "--version", "abc123"}, io.Discard, io.Discard)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	upload := ssh.callFor(t, "app1.example.com", "agent apply")
+	var desired planner.DesiredState
+	if err := json.Unmarshal([]byte(upload.stdin), &desired); err != nil {
+		t.Fatalf("uploaded state is not JSON: %v", err)
+	}
+	if desired.SecretsFile != encryptedFile {
+		t.Fatalf("uploaded state must embed the encrypted secrets file, got %q", desired.SecretsFile)
+	}
+	if len(desired.Containers) != 1 {
+		t.Fatalf("expected one accessory container, got %#v", desired.Containers)
+	}
+	postgres := desired.Containers[0]
+	if postgres.ContainerType != "accessory" || postgres.Env["POSTGRES_DB"] != "app_production" {
+		t.Fatalf("unexpected accessory environment: %#v", postgres)
+	}
+	if len(postgres.SecretNames) != 1 || postgres.SecretNames[0] != "POSTGRES_PASSWORD" {
+		t.Fatalf("unexpected accessory secrets: %#v", postgres.SecretNames)
+	}
+}
+
 func TestRemoteDeployWithSecretsFailsClearlyWhenSecretsFileMissing(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "serve.yml")

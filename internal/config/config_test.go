@@ -293,6 +293,52 @@ accessories:
 	}
 }
 
+func TestLoadParsesAccessoryEnvironment(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+accessories:
+  database:
+    image: postgres:16-alpine
+    hosts: [app.example.com]
+    env:
+      plain:
+        POSTGRES_USER: app
+        POSTGRES_DB: app_production
+      secret:
+        - POSTGRES_PASSWORD
+`)
+
+	cfg, err := config.Load(path)
+
+	if err != nil {
+		t.Fatalf("expected valid accessory environment, got error: %v", err)
+	}
+	env := cfg.Accessories["database"].Env
+	if env.Plain["POSTGRES_USER"] != "app" || env.Plain["POSTGRES_DB"] != "app_production" {
+		t.Fatalf("accessory plain environment = %#v", env.Plain)
+	}
+	if len(env.Secret) != 1 || env.Secret[0] != "POSTGRES_PASSWORD" {
+		t.Fatalf("accessory secret environment = %#v", env.Secret)
+	}
+}
+
+func TestLoadRejectsClearEnvironmentField(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+env:
+  clear:
+    RACK_ENV: production
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), "field clear not found") {
+		t.Fatalf("Load error = %v, want removed env.clear field error", err)
+	}
+}
+
 func TestLoadDefaultsRestartControllerToAgent(t *testing.T) {
 	path := writeConfig(t, "serve.yml", `
 service: my-app
@@ -346,7 +392,7 @@ servers:
     restart:
       policy: always
 env:
-  clear:
+  plain:
     RACK_ENV: staging
 `)
 	writeFile(t, filepath.Join(dir, "serve.production.yml"), `
@@ -357,7 +403,7 @@ servers:
     restart:
       max_attempts: 3
 env:
-  clear:
+  plain:
     RACK_ENV: production
     FEATURE_FLAG: enabled
 `)
@@ -377,11 +423,11 @@ env:
 	if web.Restart.MaxAttempts != 3 {
 		t.Fatalf("expected overlay restart max attempts 3, got %d", web.Restart.MaxAttempts)
 	}
-	if cfg.Env.Clear["RACK_ENV"] != "production" {
-		t.Fatalf("expected overlay env value, got %q", cfg.Env.Clear["RACK_ENV"])
+	if cfg.Env.Plain["RACK_ENV"] != "production" {
+		t.Fatalf("expected overlay env value, got %q", cfg.Env.Plain["RACK_ENV"])
 	}
-	if cfg.Env.Clear["FEATURE_FLAG"] != "enabled" {
-		t.Fatalf("expected overlay env key to be merged, got %q", cfg.Env.Clear["FEATURE_FLAG"])
+	if cfg.Env.Plain["FEATURE_FLAG"] != "enabled" {
+		t.Fatalf("expected overlay env key to be merged, got %q", cfg.Env.Plain["FEATURE_FLAG"])
 	}
 }
 
