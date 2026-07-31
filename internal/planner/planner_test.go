@@ -206,6 +206,52 @@ func TestPlanMapsAccessoryEnvironmentAndSecrets(t *testing.T) {
 	}
 }
 
+func TestPlanScopesSecretChangesToContainersThatUseThem(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Servers = map[string]config.ServerConfig{
+		"web": {Hosts: []string{"app1.example.com"}},
+	}
+	cfg.Env.Secret = []string{"APP_SECRET"}
+	cfg.Accessories = map[string]config.AccessoryConfig{
+		"database": {
+			Image: "postgres:16-alpine",
+			Hosts: []string{"app1.example.com"},
+			Env:   config.EnvConfig{Secret: []string{"DATABASE_PASSWORD"}},
+		},
+	}
+
+	plan := func(secretsFile string) planner.DesiredState {
+		t.Helper()
+		state, err := planner.Plan(cfg, planner.Options{
+			Host:               "app1.example.com",
+			Version:            "abc123",
+			SecretsFileContent: secretsFile,
+		})
+		if err != nil {
+			t.Fatalf("plan desired state: %v", err)
+		}
+		return state
+	}
+	initial := plan("APP_SECRET: ENC[AES256_GCM,data:app-v1]\nDATABASE_PASSWORD: ENC[AES256_GCM,data:database-v1]\nsops:\n  mac: first\n")
+	accessoryRotated := plan("APP_SECRET: ENC[AES256_GCM,data:app-v1]\nDATABASE_PASSWORD: ENC[AES256_GCM,data:database-v2]\nsops:\n  mac: second\n")
+	appRotated := plan("APP_SECRET: ENC[AES256_GCM,data:app-v2]\nDATABASE_PASSWORD: ENC[AES256_GCM,data:database-v1]\nsops:\n  mac: third\n")
+
+	initialAppHash := initial.Containers[0].Labels["serve.spec_hash"]
+	initialAccessoryHash := initial.Containers[1].Labels["serve.spec_hash"]
+	if got := accessoryRotated.Containers[0].Labels["serve.spec_hash"]; got != initialAppHash {
+		t.Fatalf("accessory secret rotation changed app spec hash from %q to %q", initialAppHash, got)
+	}
+	if got := accessoryRotated.Containers[1].Labels["serve.spec_hash"]; got == initialAccessoryHash {
+		t.Fatalf("accessory secret rotation did not change accessory spec hash %q", got)
+	}
+	if got := appRotated.Containers[0].Labels["serve.spec_hash"]; got == initialAppHash {
+		t.Fatalf("app secret rotation did not change app spec hash %q", got)
+	}
+	if got := appRotated.Containers[1].Labels["serve.spec_hash"]; got != initialAccessoryHash {
+		t.Fatalf("app secret rotation changed accessory spec hash from %q to %q", initialAccessoryHash, got)
+	}
+}
+
 func TestPlanSpecHashChangesWhenContainerConfigurationChanges(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Servers = map[string]config.ServerConfig{

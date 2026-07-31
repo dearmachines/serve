@@ -678,6 +678,36 @@ env:
 	}
 }
 
+func TestRemoteDeployWithAccessorySecretsExplainsMissingSecretsFile(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "serve.yml")
+	if err := os.WriteFile(configPath, []byte(`service: my-app
+image: ghcr.io/acme/my-app
+accessories:
+  database:
+    image: postgres:16-alpine
+    hosts:
+      - app1.example.com
+    env:
+      secret:
+        - DATABASE_PASSWORD
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cmd := cli.New("v1.2.3-test", cli.WithSSHRunner(&recordingSSHRunner{}))
+	var stderr bytes.Buffer
+
+	exitCode := cmd.Run(context.Background(), []string{"deploy", "--config", configPath, "--version", "abc123"}, io.Discard, &stderr)
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "application or accessory secrets are configured") {
+		t.Fatalf("expected error to explain why the secrets file is required, got %q", stderr.String())
+	}
+}
+
 func TestRemoteDeployFailsWhenAnyHostFails(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "serve.yml")

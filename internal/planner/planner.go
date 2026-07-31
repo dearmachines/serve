@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/uptimenine/serve/internal/config"
+	"gopkg.in/yaml.v3"
 )
 
 type Options struct {
@@ -313,16 +314,54 @@ func applySecrets(container *Container, env config.EnvConfig, secrets config.Sec
 
 func specHash(container Container, network string, secretsFile string) string {
 	container.Labels = nil
+	secretValues, invalidSecretsFile := secretValuesForHash(container.SecretNames, secretsFile)
 	encoded, err := json.Marshal(struct {
-		Container   Container `json:"container"`
-		Network     string    `json:"network"`
-		SecretsFile string    `json:"secrets_file,omitempty"`
-	}{Container: container, Network: network, SecretsFile: secretsFile})
+		Container          Container         `json:"container"`
+		Network            string            `json:"network"`
+		SecretValues       map[string]string `json:"secret_values,omitempty"`
+		InvalidSecretsFile string            `json:"invalid_secrets_file,omitempty"`
+	}{
+		Container:          container,
+		Network:            network,
+		SecretValues:       secretValues,
+		InvalidSecretsFile: invalidSecretsFile,
+	})
 	if err != nil {
 		panic(fmt.Sprintf("encode container spec hash: %v", err))
 	}
 	hash := sha256.Sum256(encoded)
 	return fmt.Sprintf("%x", hash[:])
+}
+
+func secretValuesForHash(names []string, secretsFile string) (map[string]string, string) {
+	if len(names) == 0 || secretsFile == "" {
+		return nil, ""
+	}
+
+	decoded := map[string]any{}
+	if err := yaml.Unmarshal([]byte(secretsFile), &decoded); err != nil {
+		return nil, secretsFile
+	}
+
+	values := make(map[string]string, len(names))
+	for _, name := range names {
+		value, ok := decoded[name]
+		if !ok {
+			values[name] = "<missing>"
+			continue
+		}
+		if stringValue, ok := value.(string); ok {
+			values[name] = stringValue
+			continue
+		}
+		encoded, err := yaml.Marshal(value)
+		if err != nil {
+			values[name] = fmt.Sprintf("%v", value)
+			continue
+		}
+		values[name] = string(encoded)
+	}
+	return values, ""
 }
 
 func copyStringMap(source map[string]string) map[string]string {

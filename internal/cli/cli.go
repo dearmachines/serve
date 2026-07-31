@@ -1084,7 +1084,7 @@ func secretsFileContent(cfg config.Config, configPath string) (string, error) {
 	path := filepath.Join(filepath.Dir(configPath), "serve.secrets.yml")
 	contents, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read secrets file %s (required because env.secret is configured): %w", path, err)
+		return "", fmt.Errorf("read secrets file %s (required because application or accessory secrets are configured): %w", path, err)
 	}
 	return string(contents), nil
 }
