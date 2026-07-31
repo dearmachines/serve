@@ -1078,13 +1078,13 @@ func (c *Command) remoteDeploy(ctx context.Context, cfg config.Config, options d
 // inside the desired state (SOPS ciphertext only). The path mirrors the
 // planner's secrets_ref: serve.secrets.yml next to the config file.
 func secretsFileContent(cfg config.Config, configPath string) (string, error) {
-	if len(cfg.Env.Secret) == 0 {
+	if !config.HasEnvSecrets(cfg) {
 		return "", nil
 	}
 	path := filepath.Join(filepath.Dir(configPath), "serve.secrets.yml")
 	contents, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read secrets file %s (required because env.secret is configured): %w", path, err)
+		return "", fmt.Errorf("read secrets file %s (required because application or accessory secrets are configured): %w", path, err)
 	}
 	return string(contents), nil
 }

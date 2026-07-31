@@ -164,6 +164,94 @@ func TestPlanIncludesOnlyRolesAndAccessoriesForHost(t *testing.T) {
 	}
 }
 
+func TestPlanMapsAccessoryEnvironmentAndSecrets(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Servers = map[string]config.ServerConfig{
+		"web": {Hosts: []string{"app1.example.com"}},
+	}
+	cfg.Accessories = map[string]config.AccessoryConfig{
+		"postgres": {
+			Image: "postgres:16-alpine",
+			Hosts: []string{"app1.example.com"},
+			Env: config.EnvConfig{
+				Plain:  map[string]string{"POSTGRES_USER": "app", "POSTGRES_DB": "app_production"},
+				Secret: []string{"POSTGRES_PASSWORD"},
+			},
+		},
+	}
+	cfg.Secrets.Provider = "sops"
+	encryptedFile := "POSTGRES_PASSWORD: ENC[AES256_GCM,data:password-ciphertext]\n"
+
+	state, err := planner.Plan(cfg, planner.Options{
+		Host:               "app1.example.com",
+		Version:            "abc123",
+		SecretsFileContent: encryptedFile,
+	})
+
+	if err != nil {
+		t.Fatalf("expected plan, got error: %v", err)
+	}
+	postgres := state.Containers[1]
+	if !reflect.DeepEqual(postgres.Env, cfg.Accessories["postgres"].Env.Plain) {
+		t.Fatalf("accessory environment = %#v, want %#v", postgres.Env, cfg.Accessories["postgres"].Env.Plain)
+	}
+	if !reflect.DeepEqual(postgres.SecretNames, []string{"POSTGRES_PASSWORD"}) {
+		t.Fatalf("accessory secret names = %#v", postgres.SecretNames)
+	}
+	if postgres.SecretsRef != "sops:serve.secrets.yml" {
+		t.Fatalf("accessory secrets ref = %q", postgres.SecretsRef)
+	}
+	if state.SecretsFile != encryptedFile {
+		t.Fatalf("desired state secrets file = %q", state.SecretsFile)
+	}
+}
+
+func TestPlanScopesSecretChangesToContainersThatUseThem(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Servers = map[string]config.ServerConfig{
+		"web": {Hosts: []string{"app1.example.com"}},
+	}
+	cfg.Env.Secret = []string{"APP_SECRET"}
+	cfg.Accessories = map[string]config.AccessoryConfig{
+		"database": {
+			Image: "postgres:16-alpine",
+			Hosts: []string{"app1.example.com"},
+			Env:   config.EnvConfig{Secret: []string{"DATABASE_PASSWORD"}},
+		},
+	}
+
+	plan := func(secretsFile string) planner.DesiredState {
+		t.Helper()
+		state, err := planner.Plan(cfg, planner.Options{
+			Host:               "app1.example.com",
+			Version:            "abc123",
+			SecretsFileContent: secretsFile,
+		})
+		if err != nil {
+			t.Fatalf("plan desired state: %v", err)
+		}
+		return state
+	}
+	initial := plan("APP_SECRET: ENC[AES256_GCM,data:app-v1]\nDATABASE_PASSWORD: ENC[AES256_GCM,data:database-v1]\nsops:\n  mac: first\n")
+	accessoryRotated := plan("APP_SECRET: ENC[AES256_GCM,data:app-v1]\nDATABASE_PASSWORD: ENC[AES256_GCM,data:database-v2]\nsops:\n  mac: second\n")
+	appRotated := plan("APP_SECRET: ENC[AES256_GCM,data:app-v2]\nDATABASE_PASSWORD: ENC[AES256_GCM,data:database-v1]\nsops:\n  mac: third\n")
+
+	initialAppHash := initial.Containers[0].Labels["serve.spec_hash"]
+	initialAccessoryHash := initial.Containers[1].Labels["serve.spec_hash"]
+	if got := accessoryRotated.Containers[0].Labels["serve.spec_hash"]; got != initialAppHash {
+		t.Fatalf("accessory secret rotation changed app spec hash from %q to %q", initialAppHash, got)
+	}
+	if got := accessoryRotated.Containers[1].Labels["serve.spec_hash"]; got == initialAccessoryHash {
+		t.Fatalf("accessory secret rotation did not change accessory spec hash %q", got)
+	}
+	if got := appRotated.Containers[0].Labels["serve.spec_hash"]; got == initialAppHash {
+		t.Fatalf("app secret rotation did not change app spec hash %q", got)
+	}
+	if got := appRotated.Containers[1].Labels["serve.spec_hash"]; got != initialAccessoryHash {
+		t.Fatalf("app secret rotation changed accessory spec hash from %q to %q", initialAccessoryHash, got)
+	}
+}
+
 func TestPlanSpecHashChangesWhenContainerConfigurationChanges(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Servers = map[string]config.ServerConfig{
@@ -174,7 +262,7 @@ func TestPlanSpecHashChangesWhenContainerConfigurationChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("plan first state: %v", err)
 	}
-	cfg.Env.Clear["RACK_ENV"] = "staging"
+	cfg.Env.Plain["RACK_ENV"] = "staging"
 	second, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
 	if err != nil {
 		t.Fatalf("plan changed state: %v", err)
@@ -331,6 +419,6 @@ func baseConfig() config.Config {
 		Networking:       config.NetworkingConfig{PrivateNetwork: "serve"},
 		RetainContainers: 5,
 		Proxy:            config.ProxyConfig{AppRole: "web"},
-		Env:              config.EnvConfig{Clear: map[string]string{"RACK_ENV": "production"}},
+		Env:              config.EnvConfig{Plain: map[string]string{"RACK_ENV": "production"}},
 	}
 }

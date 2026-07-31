@@ -84,10 +84,11 @@ type AccessoryConfig struct {
 	InternalPort int           `yaml:"internal_port"`
 	Volumes      []string      `yaml:"volumes"`
 	Restart      RestartConfig `yaml:"restart"`
+	Env          EnvConfig     `yaml:"env"`
 }
 
 type EnvConfig struct {
-	Clear  map[string]string `yaml:"clear"`
+	Plain  map[string]string `yaml:"plain"`
 	Secret []string          `yaml:"secret"`
 }
 
@@ -95,6 +96,18 @@ type SecretsConfig struct {
 	Provider string `yaml:"provider"`
 	KMS      string `yaml:"kms"`
 	Key      string `yaml:"key"`
+}
+
+func HasEnvSecrets(cfg Config) bool {
+	if len(cfg.Env.Secret) > 0 {
+		return true
+	}
+	for _, accessory := range cfg.Accessories {
+		if len(accessory.Env.Secret) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 type ObservabilityConfig struct {
