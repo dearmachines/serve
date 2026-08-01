@@ -179,21 +179,117 @@ serve agent apply ./desired.json --socket /run/serve/agent.sock
 
 ## Environment and secrets
 
-Applications and accessories use the same environment schema:
+Applications and accessories use the same `plain`/`secret` shape, but at different scopes.
+
+### Application example
+
+Top-level `env` applies to every application role:
 
 ```yaml
+service: api
+image: ghcr.io/acme/api
+
+servers:
+  web:
+    hosts: [deploy@app.example.com]
+    command: ./api
+    app_port: 3000
+  worker:
+    hosts: [deploy@app.example.com]
+    command: ./worker
+
 env:
   plain:
+    APP_ENV: production
     LOG_LEVEL: info
   secret:
+    - DATABASE_URL
     - API_TOKEN
 ```
 
-- Use `env.plain` for non-sensitive values stored directly in Serve and Docker configuration.
-- Use `env.secret` for names resolved from the SOPS-encrypted `serve.secrets.yml` beside `serve.yml`.
-- `env.clear` is not supported.
-- Accessory secrets must trigger the same encrypted-file delivery and host-side resolution as application secrets.
-- Environment secrets are ultimately stored in Docker's container environment and visible to privileged Docker users. File-mounted secrets are not implemented.
+Both `web` and `worker` receive the four variables above.
+
+### Accessory example
+
+Nested `env` applies only to that named accessory:
+
+```yaml
+accessories:
+  postgres:
+    image: postgres:16-alpine
+    hosts: [deploy@app.example.com]
+    aliases: [database]
+    internal_port: 5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    env:
+      plain:
+        POSTGRES_USER: api
+        POSTGRES_DB: api_production
+      secret:
+        - POSTGRES_PASSWORD
+```
+
+The application does not inherit the PostgreSQL variables. Likewise, the accessory does not inherit top-level application variables. To give the same secret to both, list its name in both `env.secret` lists.
+
+The schema is image-agnostic. A second accessory can declare a completely different environment:
+
+```yaml
+accessories:
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    hosts: [deploy@app.example.com]
+    aliases: [queue]
+    internal_port: 5672
+    env:
+      plain:
+        RABBITMQ_DEFAULT_USER: api
+        RABBITMQ_DEFAULT_VHOST: api
+      secret:
+        - RABBITMQ_DEFAULT_PASS
+```
+
+### Secrets file example
+
+All referenced names live in the single SOPS-encrypted `serve.secrets.yml` beside `serve.yml`. Run:
+
+```sh
+serve secrets edit --file serve.secrets.yml
+```
+
+The decrypted editor view may contain:
+
+```yaml
+DATABASE_URL: postgres://api:change-me@database:5432/api_production
+API_TOKEN: change-me
+POSTGRES_PASSWORD: change-me
+RABBITMQ_DEFAULT_PASS: change-me
+```
+
+SOPS encrypts the file when the editor closes. Hosts receive ciphertext and must have the `sops` binary and decryption credentials.
+
+### Schema and behavior rules
+
+- `env.plain` must be a map of names to non-sensitive string values.
+- `env.secret` must be a list of names; secret values never belong in `serve.yml`.
+- `env.clear`, a direct `env: {NAME: value}` map, and accessory-level `secrets:` are not supported schemas.
+- Top-level `env` applies to app roles; `accessories.<name>.env` applies only to that accessory.
+- A missing `serve.secrets.yml` must fail before contacting deployment hosts when any app or accessory declares `env.secret`.
+- Desired state carries the encrypted file, secret references, and names, never decrypted values.
+- Secret material is written to a private tmpfs env file only while Docker creates the container, then deleted.
+- Docker ultimately stores environment values in container metadata, visible to privileged Docker users. File-mounted runtime secrets are not implemented.
+- Container spec hashes include only ciphertext for names that container references. Rotating one secret must not restart unrelated app or accessory containers.
+- Stateful accessories still follow application version, deploy, rollback, and retention behavior. Do not claim database-specific upgrade or zero-downtime semantics.
+
+### Tests for environment changes
+
+When changing this behavior, cover the vertical path:
+
+1. `internal/config`: strict YAML parsing, app/accessory scope, and rejected field names.
+2. `internal/planner`: plain values, secret names, encrypted file delivery, and per-container spec hashes.
+3. `internal/cli`: missing-file failures and remote desired-state payloads.
+4. `internal/agent/reconciler`: just-in-time secret resolution, env-file cleanup, and runtime specs.
+5. `internal/runtime/docker`: Docker environment/env-file behavior when that boundary changes.
 
 ## Host prerequisites
 

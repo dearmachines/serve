@@ -7,8 +7,8 @@ Serve deploys Docker applications to your own servers over SSH. It performs heal
 Prebuilt releases are available for Linux AMD64. Install the binary on the computer you deploy from and on every deployment host:
 
 ```sh
-curl -fLO https://github.com/uptimenine/serve/releases/latest/download/serve-linux-amd64
-curl -fLO https://github.com/uptimenine/serve/releases/latest/download/SHA256SUMS
+curl -fLO https://github.com/dearmachines/serve/releases/latest/download/serve-linux-amd64
+curl -fLO https://github.com/dearmachines/serve/releases/latest/download/SHA256SUMS
 sha256sum --check SHA256SUMS
 sudo install -m 0755 serve-linux-amd64 /usr/local/bin/serve
 serve version
@@ -30,7 +30,7 @@ Each deployment host needs:
 Install and start the agent once on each host:
 
 ```sh
-curl -fL https://raw.githubusercontent.com/uptimenine/serve/main/packaging/systemd/serve-agent.service \
+curl -fL https://raw.githubusercontent.com/dearmachines/serve/main/packaging/systemd/serve-agent.service \
   -o serve-agent.service
 sudo install -m 0644 serve-agent.service /etc/systemd/system/serve-agent.service
 sudo systemctl daemon-reload
@@ -150,33 +150,187 @@ proxy:
 
 Different applications can also use different domains on the same machine. Keep `service` names and proxy hostnames unique between applications.
 
-## Private images, environment, and secrets
+## Private images
 
 Authenticate Docker to private registries on every deployment host before deploying. Serve reads the host's standard Docker client configuration, including credential helpers, but does not provision credentials. See [Private registry access](docs/private-registry-access.md).
 
-Applications and accessories accept plain environment values and SOPS-backed secrets:
+## Environment variables and secrets
+
+Applications and accessories use the same environment shape:
 
 ```yaml
 env:
   plain:
-    RACK_ENV: production
+    NAME: value
   secret:
+    - SECRET_NAME
+```
+
+- `env.plain` is a map of non-sensitive values stored directly in `serve.yml`, Serve's desired state, and Docker's container configuration.
+- `env.secret` is a list of names resolved from the SOPS-encrypted `serve.secrets.yml` beside `serve.yml`.
+- Top-level `env` applies to every application role. An accessory's nested `env` applies only to that accessory.
+- `env.clear` is not supported.
+
+### Application environment
+
+Use top-level `env` for web and worker containers:
+
+```yaml
+service: billing
+image: ghcr.io/acme/billing
+
+servers:
+  web:
+    hosts:
+      - deploy@app.example.com
+    command: ./billing-server
+    app_port: 3000
+  worker:
+    hosts:
+      - deploy@app.example.com
+    command: ./billing-worker
+
+env:
+  plain:
+    APP_ENV: production
+    LOG_LEVEL: info
+  secret:
+    - DATABASE_URL
+    - SECRET_KEY_BASE
+```
+
+Both `web` and `worker` receive all four variables. The plain values come from `serve.yml`; the two secret values come from `serve.secrets.yml`.
+
+### Accessory environment
+
+Put `env` inside an accessory when only that supporting container needs the values:
+
+```yaml
+accessories:
+  postgres:
+    image: postgres:16-alpine
+    hosts:
+      - deploy@app.example.com
+    aliases:
+      - database
+    internal_port: 5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    env:
+      plain:
+        POSTGRES_USER: billing
+        POSTGRES_DB: billing_production
+      secret:
+        - POSTGRES_PASSWORD
+```
+
+The application does not receive `POSTGRES_USER`, `POSTGRES_DB`, or `POSTGRES_PASSWORD`. The `database` alias is available on the private Docker network; `internal_port` does not publish PostgreSQL on a host port.
+
+The schema is generic rather than database-specific. For example, RabbitMQ can define its own plain and secret variables:
+
+```yaml
+accessories:
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    hosts:
+      - deploy@app.example.com
+    aliases:
+      - queue
+    internal_port: 5672
+    env:
+      plain:
+        RABBITMQ_DEFAULT_USER: billing
+        RABBITMQ_DEFAULT_VHOST: billing
+      secret:
+        - RABBITMQ_DEFAULT_PASS
+```
+
+Each accessory receives only its own nested environment.
+
+### Create and edit secrets
+
+Configure SOPS and its decryption credentials on the deployment machine and every host, then open the encrypted file through Serve:
+
+```sh
+serve secrets edit --file serve.secrets.yml
+```
+
+Inside the editor, add the names referenced by every application and accessory. The editor shows decrypted values; SOPS encrypts them when you save:
+
+```yaml
+DATABASE_URL: postgres://billing:change-me@database:5432/billing_production
+SECRET_KEY_BASE: change-me
+POSTGRES_PASSWORD: change-me
+RABBITMQ_DEFAULT_PASS: change-me
+```
+
+Commit only the encrypted `serve.secrets.yml`. During deploy, Serve sends its ciphertext to each host, decrypts it there, injects only the names requested by each container, and removes the temporary plaintext env file after Docker creates the container. Rotating a secret recreates only containers that reference that name.
+
+Environment secrets ultimately become Docker environment variables and are visible to users with privileged Docker access. Serve does not yet support file-mounted runtime secrets.
+
+### Complete application and PostgreSQL example
+
+> **Stateful accessory lifecycle:** accessories currently follow application versions during deploy and retention. The example below demonstrates environment and secret configuration, but Serve does not yet provide a database-specific upgrade or zero-downtime lifecycle. Use an externally managed database when that lifecycle is required.
+
+```yaml
+service: billing
+image: ghcr.io/acme/billing
+destination: production
+
+servers:
+  web:
+    hosts:
+      - deploy@app.example.com
+    command: ./billing-server
+    app_port: 3000
+    replicas: 2
+    healthcheck:
+      http:
+        path: /up
+        port: 3000
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+env:
+  plain:
+    APP_ENV: production
+    LOG_LEVEL: info
+  secret:
+    - DATABASE_URL
     - SECRET_KEY_BASE
 
 accessories:
   postgres:
     image: postgres:16-alpine
     hosts:
-      - deploy@example.com
+      - deploy@app.example.com
+    aliases:
+      - database
+    internal_port: 5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     env:
       plain:
-        POSTGRES_USER: app
-        POSTGRES_DB: app_production
+        POSTGRES_USER: billing
+        POSTGRES_DB: billing_production
       secret:
         - POSTGRES_PASSWORD
+
+proxy:
+  provider: kamal-proxy
+  app_role: web
+  hosts:
+    - billing.example.com
+  ssl: auto
+
+networking:
+  private_network: serve
+
+retain_containers: 5
 ```
 
-`env.plain` values are stored directly in Serve and Docker configuration. Names listed under `env.secret` are loaded from the SOPS-encrypted `serve.secrets.yml` next to `serve.yml`. Hosts that decrypt secrets must have SOPS and the appropriate decryption credentials installed.
+The application connects to PostgreSQL through the `database` network alias. Its `DATABASE_URL` and the accessory's `POSTGRES_PASSWORD` are separate secret entries, even when they contain related credentials.
 
 ## Documentation
 
