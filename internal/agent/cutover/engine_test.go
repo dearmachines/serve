@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -151,6 +152,153 @@ func TestHealthyCandidateCutsOverAndStopsOldVersion(t *testing.T) {
 	}
 	if lastGood.Version != "def456" {
 		t.Fatalf("last-good version = %q, want def456", lastGood.Version)
+	}
+}
+
+func TestAliasedCandidateActivatesOnlyAfterHealthAndReplacesOldAlias(t *testing.T) {
+	env := newEnv(t)
+	current := desiredState("abc123", 1, false)
+	current.Containers[0].Aliases = []string{"api"}
+	env.deploy(t, current)
+
+	candidate := desiredState("def456", 1, false)
+	candidate.Containers[0].Aliases = []string{"api"}
+	env.checker.SetStatus(candidate.Containers[0].Name, health.Healthy)
+	if err := env.engine.Apply(context.Background(), candidate); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	created, ok := env.rt.CreatedSpec(candidate.Containers[0].Name)
+	if !ok {
+		t.Fatalf("candidate create spec was not recorded")
+	}
+	if len(created.Aliases) != 0 {
+		t.Fatalf("candidate aliases were exposed before health gate: %#v", created.Aliases)
+	}
+	active := env.containersByVersion(t, "def456")
+	if len(active) != 1 || !reflect.DeepEqual(active[0].Aliases, []string{"api"}) {
+		t.Fatalf("active candidate aliases = %+v", active)
+	}
+	old := env.containersByVersion(t, "abc123")
+	if len(old) != 1 || len(old[0].Aliases) != 0 {
+		t.Fatalf("old version retained service aliases after cutover: %+v", old)
+	}
+}
+
+func TestUnhealthyAliasedCandidateNeverActivatesAlias(t *testing.T) {
+	env := newEnv(t)
+	current := desiredState("abc123", 1, false)
+	current.Containers[0].Aliases = []string{"api"}
+	env.deploy(t, current)
+
+	candidate := desiredState("def456", 1, false)
+	candidate.Containers[0].Aliases = []string{"api"}
+	env.checker.SetStatus(candidate.Containers[0].Name, health.Unhealthy)
+
+	err := env.engine.Apply(context.Background(), candidate)
+	if !errors.Is(err, cutover.ErrCandidateUnhealthy) {
+		t.Fatalf("Apply error = %v, want ErrCandidateUnhealthy", err)
+	}
+	created, ok := env.rt.CreatedSpec(candidate.Containers[0].Name)
+	if !ok {
+		t.Fatalf("candidate create spec was not recorded")
+	}
+	if len(created.Aliases) != 0 {
+		t.Fatalf("unhealthy candidate received aliases: %#v", created.Aliases)
+	}
+	old := env.containersByVersion(t, "abc123")
+	if len(old) != 1 || !reflect.DeepEqual(old[0].Aliases, []string{"api"}) {
+		t.Fatalf("old version lost its aliases after failed deploy: %+v", old)
+	}
+}
+
+func TestAliasedDeployCanMoveToDifferentPrivateNetwork(t *testing.T) {
+	env := newEnv(t)
+	current := desiredState("abc123", 1, false)
+	current.Network = "serve-old"
+	current.Containers[0].Aliases = []string{"api"}
+	env.deploy(t, current)
+
+	candidate := desiredState("def456", 1, false)
+	candidate.Network = "serve-new"
+	candidate.Containers[0].Aliases = []string{"api"}
+	env.checker.SetStatus(candidate.Containers[0].Name, health.Healthy)
+
+	if err := env.engine.Apply(context.Background(), candidate); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	active := env.containersByVersion(t, "def456")
+	if len(active) != 1 || active[0].Network != "serve-new" || !reflect.DeepEqual(active[0].Aliases, []string{"api"}) {
+		t.Fatalf("candidate network aliases = %+v", active)
+	}
+	old := env.containersByVersion(t, "abc123")
+	if len(old) != 1 || old[0].Running || len(old[0].Aliases) != 0 {
+		t.Fatalf("old network aliases were not retired: %+v", old)
+	}
+}
+
+func TestAliasActivationRejectsAnotherServiceOwner(t *testing.T) {
+	env := newEnv(t)
+	foreignID, err := env.rt.CreateContainer(context.Background(), runtime.ContainerSpec{
+		Name:    "other-api-production-v1-r1",
+		Image:   "other:v1",
+		Network: "serve",
+		Aliases: []string{"api"},
+		Labels: map[string]string{
+			"serve.managed":     "true",
+			"serve.service":     "other",
+			"serve.destination": "production",
+			"serve.role":        "web",
+			"serve.version":     "v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create foreign container: %v", err)
+	}
+	if err := env.rt.StartContainer(context.Background(), foreignID); err != nil {
+		t.Fatalf("start foreign container: %v", err)
+	}
+
+	desired := desiredState("abc123", 1, false)
+	desired.Containers[0].Aliases = []string{"api"}
+	env.checker.SetStatus(desired.Containers[0].Name, health.Healthy)
+
+	err = env.engine.Apply(context.Background(), desired)
+	if err == nil || !strings.Contains(err.Error(), `network alias "api" is already owned by other/web`) {
+		t.Fatalf("Apply error = %v, want conflicting alias owner", err)
+	}
+	if candidates := env.containersByVersion(t, "abc123"); len(candidates) != 0 {
+		t.Fatalf("candidate survived alias conflict: %+v", candidates)
+	}
+	foreign, err := env.rt.InspectContainer(context.Background(), foreignID)
+	if err != nil || !foreign.Running || !reflect.DeepEqual(foreign.Aliases, []string{"api"}) {
+		t.Fatalf("foreign alias owner changed: state=%+v error=%v", foreign, err)
+	}
+}
+
+func TestUnhealthyAliasedDependentKeepsOldVersionServing(t *testing.T) {
+	env := newEnv(t)
+	current := desiredState("abc123", 1, true)
+	current.Containers[1].Aliases = []string{"jobs"}
+	current.Containers[1].Healthcheck = &planner.Healthcheck{Type: "http", Path: "/up", Port: 4000, Interval: "1ms", Retries: 1}
+	env.deploy(t, current)
+
+	candidate := desiredState("def456", 1, true)
+	candidate.Containers[1].Aliases = []string{"jobs"}
+	candidate.Containers[1].Healthcheck = &planner.Healthcheck{Type: "http", Path: "/up", Port: 4000, Interval: "1ms", Retries: 1}
+	env.checker.SetStatus(candidate.Containers[0].Name, health.Healthy)
+	env.checker.SetStatus(candidate.Containers[1].Name, health.Unhealthy)
+
+	err := env.engine.Apply(context.Background(), candidate)
+	if !errors.Is(err, cutover.ErrCandidateUnhealthy) {
+		t.Fatalf("Apply error = %v, want aliased dependent health failure", err)
+	}
+	if candidates := env.containersByVersion(t, "def456"); len(candidates) != 0 {
+		t.Fatalf("failed candidate containers were not cleaned up: %+v", candidates)
+	}
+	old := env.containersByVersion(t, "abc123")
+	if len(old) != 2 || !old[0].Running || !old[1].Running {
+		t.Fatalf("old version did not remain running: %+v", old)
 	}
 }
 

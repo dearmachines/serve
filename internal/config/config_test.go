@@ -132,6 +132,91 @@ servers:
 	}
 }
 
+func TestLoadParsesServerAliases(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  api:
+    hosts: [app.example.com]
+    aliases:
+      - api
+      - api.internal
+`)
+
+	cfg, err := config.Load(path)
+
+	if err != nil {
+		t.Fatalf("expected valid server aliases, got error: %v", err)
+	}
+	aliases := cfg.Servers["api"].Aliases
+	if len(aliases) != 2 || aliases[0] != "api" || aliases[1] != "api.internal" {
+		t.Fatalf("server aliases = %#v, want api and api.internal", aliases)
+	}
+}
+
+func TestLoadRejectsInvalidOrConflictingAliases(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{
+			name: "empty",
+			config: `service: app
+image: app
+servers:
+  api:
+    aliases: [""]
+`,
+			want: "servers.api.aliases",
+		},
+		{
+			name: "invalid",
+			config: `service: app
+image: app
+servers:
+  api:
+    aliases: [api/unsafe]
+`,
+			want: "servers.api.aliases",
+		},
+		{
+			name: "duplicate across roles",
+			config: `service: app
+image: app
+servers:
+  api:
+    aliases: [backend]
+  voice:
+    aliases: [backend]
+`,
+			want: `alias "backend" is also used by servers.api`,
+		},
+		{
+			name: "conflicts with accessory",
+			config: `service: app
+image: app
+servers:
+  api:
+    aliases: [backend]
+accessories:
+  redis:
+    image: redis:7
+    aliases: [backend]
+`,
+			want: `alias "backend" is also used by servers.api`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := config.Load(writeConfig(t, "serve.yml", test.config))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load error = %v, want alias error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadAcceptsStandardSSHDestinations(t *testing.T) {
 	path := writeConfig(t, "serve.yml", `
 service: app

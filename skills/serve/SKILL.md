@@ -18,7 +18,7 @@ The current implementation and its behavior tests are the source of truth for in
 
 ## Current product status
 
-The core deploy loop is implemented: remote deploy over SSH, the long-running agent, event-driven healing, periodic reconciliation, health-gated blue-green cutover through kamal-proxy, SOPS secret delivery, rollback state, and remote status/logs/events/exec.
+The core deploy loop is implemented: remote deploy over SSH, the long-running agent, event-driven healing, periodic reconciliation, health-gated blue-green cutover through kamal-proxy, health-gated private server aliases, SOPS secret delivery, rollback state, and remote status/logs/events/exec.
 
 Implemented commands:
 
@@ -177,6 +177,56 @@ Submit desired state to a running agent:
 serve agent apply ./desired.json --socket /run/serve/agent.sock
 ```
 
+## Private server aliases
+
+Application server roles can claim stable names on their host's private Docker network:
+
+```yaml
+service: api
+image: ghcr.io/acme/api
+
+servers:
+  web:
+    hosts: [deploy@app.example.com]
+    aliases: [api]
+    app_port: 4000
+    healthcheck:
+      http:
+        path: /up
+        port: 4000
+
+networking:
+  private_network: serve
+```
+
+Another container on that host and network can use `http://api:4000`. This supports communication between services deployed from separate configuration files with different top-level images.
+
+### Alias behavior and safety rules
+
+- `servers.<role>.aliases` and `accessories.<name>.aliases` are lists of valid identifiers. Aliases cannot conflict between unrelated workloads on the same host and network.
+- Every replica of a server role receives its aliases, allowing Docker DNS to distribute lookups across active replicas.
+- The planner includes desired aliases in the container spec hash, but the cutover engine must start candidates without server aliases.
+- For aliased roles with health checks, candidates are checked before alias activation and checked again after Docker reconnects their network endpoint.
+- Public proxy traffic switches only after alias activation succeeds. Old aliases are removed after proxy cutover and before old containers are retired.
+- A failed health check, alias activation, or proxy switch must clean up candidates and preserve the old version's aliases.
+- `ReplaceNetworkAliases` must be idempotent and make a best-effort restoration of the old network attachment if replacement fails.
+- Docker's container-list response omits custom network aliases. The Docker runtime must inspect listed containers before reporting `ContainerState.Aliases`; do not regress to summary-only alias discovery.
+- Aliases are host-local and require callers and receivers to share `networking.private_network`. They do not provide cross-host discovery.
+- Direct alias traffic bypasses kamal-proxy's ongoing health routing and TLS termination. Do not describe aliases as equivalent to proxy routing.
+- Server roles still share the single top-level `image`, and one config still has one `proxy.app_role`. Use separate configs for different images or public routes.
+
+### Tests for alias changes
+
+Cover the vertical path with red-green-refactor:
+
+1. `internal/config`: strict parsing, invalid aliases, and role/accessory conflicts.
+2. `internal/planner`: aliases on every intended replica and spec-hash changes.
+3. `internal/runtime/fake`: state updates and idempotence.
+4. `internal/runtime/docker`: real network alias replacement and aliases returned by `ListContainers` under the `integration` build tag.
+5. `internal/agent/cutover`: unhealthy candidates never claim aliases, successful handoff removes old aliases, ownership conflicts preserve the current version, dependent-role health gates, and private-network changes.
+
+See `docs/private-service-aliases.md` for user-facing configuration and limitations.
+
 ## Environment and secrets
 
 Applications and accessories use the same `plain`/`secret` shape, but at different scopes.
@@ -302,6 +352,7 @@ Host provisioning is intentionally out of scope. Docker, the Serve binary, the s
 - Docker is the runtime, not the orchestrator.
 - Systemd should only start the Serve agent, not individual app containers.
 - App/accessory containers are managed through the agent/reconciler.
+- Health-gated server aliases are activated by the cutover engine, not exposed when candidate containers are initially created.
 - Plaintext secrets are materialized in tmpfs env files only while Docker creates app or accessory containers; never put them on CLI args or in logs.
 - Do not add host provisioning or installation behavior to `serve setup`.
 
@@ -312,12 +363,12 @@ cmd/serve                         CLI entrypoint
 internal/cli                      CLI command routing and local command implementations
 internal/config                   serve.yml parser/validator
 internal/planner                  desired-state planner
-internal/runtime                  runtime interface
+internal/runtime                  runtime and network-alias interfaces
 internal/runtime/fake             in-memory runtime for behavior tests
-internal/runtime/docker           Docker Engine implementation
+internal/runtime/docker           Docker Engine and network-alias implementation
 internal/agent/state              desired/actual/last-good state store
 internal/agent/reconciler         desired-state reconciler
-internal/agent/cutover            blue-green cutover and retention engine
+internal/agent/cutover            health-gated blue-green, alias handoff, and retention engine
 internal/agent/daemon             long-running agent and Unix socket API
 internal/agent/events             structured lifecycle events
 internal/agent/healing            restart/healing supervisor

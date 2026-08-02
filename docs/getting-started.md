@@ -136,6 +136,7 @@ Notes:
 - The planned image tag must already exist locally or be pullable with credentials from `$DOCKER_CONFIG/config.json` or `$HOME/.docker/config.json`.
 - Remote deploy assumes the agent is already installed and running on each host (`serve setup` is not implemented yet).
 - Deploys are blue-green: candidates start next to the old version, traffic switches through kamal-proxy only after health passes, old versions are retained per `retain_containers` for rollback.
+- A server role can set `aliases` to provide stable, host-local names on `networking.private_network`. Serve health-gates alias activation when the role has a health check. Alias names must be unique across configurations sharing the network, and direct alias traffic bypasses kamal-proxy's ongoing health routing. See [Private service aliases](private-service-aliases.md).
 - Applications and accessories support `env.plain` values and names listed under `env.secret`. When any `env.secret` is configured, deploy embeds the encrypted `serve.secrets.yml` (SOPS ciphertext) in the desired state; the host agent decrypts it just-in-time with the host's credentials (`sops` binary required on hosts).
 - `setup` is registered but not implemented yet.
 

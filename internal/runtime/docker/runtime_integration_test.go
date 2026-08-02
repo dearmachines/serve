@@ -137,6 +137,61 @@ func TestDockerRuntimeCreatesNetworkBeforeContainerUsesIt(t *testing.T) {
 	}
 }
 
+func TestDockerRuntimeReplacesNetworkAliases(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rt := newDockerRuntime(t)
+	networkName := testContainerName(t, "alias-network")
+	containerName := testContainerName(t, "aliased")
+
+	if err := rt.PullImage(ctx, testImage); err != nil {
+		t.Fatalf("pull image: %v", err)
+	}
+	if err := rt.CreateNetwork(ctx, runtime.NetworkSpec{Name: networkName}); err != nil {
+		t.Fatalf("create network: %v", err)
+	}
+	defer removeNetwork(t, rt, networkName)
+
+	id, err := rt.CreateContainer(ctx, runtime.ContainerSpec{
+		Name:    containerName,
+		Image:   testImage,
+		Command: []string{"sh", "-c", "sleep 60"},
+		Network: networkName,
+		Aliases: []string{"old-api"},
+		Labels:  map[string]string{"serve.integration_test": t.Name()},
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	defer removeContainer(t, rt, id)
+	if err := rt.StartContainer(ctx, id); err != nil {
+		t.Fatalf("start container: %v", err)
+	}
+
+	aliases := []string{"api", "api.internal"}
+	if err := rt.ReplaceNetworkAliases(ctx, id, networkName, aliases); err != nil {
+		t.Fatalf("replace aliases: %v", err)
+	}
+	if err := rt.ReplaceNetworkAliases(ctx, id, networkName, aliases); err != nil {
+		t.Fatalf("repeat alias replacement: %v", err)
+	}
+
+	state, err := rt.InspectContainer(ctx, id)
+	if err != nil {
+		t.Fatalf("inspect container: %v", err)
+	}
+	if state.Network != networkName || !reflect.DeepEqual(state.Aliases, aliases) {
+		t.Fatalf("network attachment = %q/%#v, want %q/%#v", state.Network, state.Aliases, networkName, aliases)
+	}
+	listed, err := rt.ListContainers(ctx, runtime.ContainerFilters{Labels: map[string]string{"serve.integration_test": t.Name()}})
+	if err != nil {
+		t.Fatalf("list container: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Network != networkName || !reflect.DeepEqual(listed[0].Aliases, aliases) {
+		t.Fatalf("listed network attachment = %+v, want %q/%#v", listed, networkName, aliases)
+	}
+}
+
 func TestDockerRuntimeListsContainersByLabel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

@@ -2,6 +2,7 @@ package fake_test
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -72,6 +73,39 @@ func TestFakeRuntimeListsContainersByLabels(t *testing.T) {
 	}
 	if containers[0].ID != webID {
 		t.Fatalf("expected web container %q, got %#v", webID, containers[0])
+	}
+}
+
+func TestFakeRuntimeReplacesNetworkAliasesIdempotently(t *testing.T) {
+	rt := fake.NewRuntime()
+	id, err := rt.CreateContainer(context.Background(), runtime.ContainerSpec{
+		Name:    "api",
+		Image:   "app:api",
+		Network: "serve",
+		Aliases: []string{"old-api"},
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	rt.ClearOperations()
+
+	if err := rt.ReplaceNetworkAliases(context.Background(), id, "serve", []string{"api", "api.internal"}); err != nil {
+		t.Fatalf("replace aliases: %v", err)
+	}
+	if err := rt.ReplaceNetworkAliases(context.Background(), id, "serve", []string{"api", "api.internal"}); err != nil {
+		t.Fatalf("repeat alias replacement: %v", err)
+	}
+
+	state, err := rt.InspectContainer(context.Background(), id)
+	if err != nil {
+		t.Fatalf("inspect container: %v", err)
+	}
+	if state.Network != "serve" || !reflect.DeepEqual(state.Aliases, []string{"api", "api.internal"}) {
+		t.Fatalf("network attachment = %q/%#v", state.Network, state.Aliases)
+	}
+	operations := rt.Operations()
+	if !reflect.DeepEqual(operations, []string{"replace_network_aliases:api:api,api.internal"}) {
+		t.Fatalf("alias operations = %#v, want one idempotent update", operations)
 	}
 }
 

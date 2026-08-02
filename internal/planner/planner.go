@@ -162,6 +162,7 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 				Env:           copyStringMap(cfg.Env.Plain),
 				Healthcheck:   healthcheck(server.Healthcheck),
 				Restart:       restart(server.Restart),
+				Aliases:       append([]string(nil), server.Aliases...),
 				Labels:        labels(cfg.Service, destination, role, opts.Version, replica, "app"),
 			}
 			if server.AppPort > 0 {
