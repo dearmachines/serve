@@ -168,7 +168,7 @@ services:
         command: ./worker
 ```
 
-`serve deploy` deploys every service in name order. Pass `--service api` to deploy one service. Existing single-service configuration remains supported.
+`serve deploy` deploys every service in name order. Pass `--service api` to deploy one service. Existing single-service configuration remains supported. Serve validates and plans every selected service before contacting a host, then applies them in deterministic service and host order. Each host apply is transactional, but the whole file is not: a later failure does not roll back services or hosts already deployed.
 
 All applications deployed to the same machine share its Serve agent, Docker network, and central `kamal-proxy` container. Proxy hostnames must be unique between services. One application can still answer on multiple domains by listing several values under its `proxy.hosts`.
 

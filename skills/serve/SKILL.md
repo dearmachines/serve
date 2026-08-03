@@ -229,7 +229,48 @@ See `docs/private-service-aliases.md` for user-facing configuration and limitati
 
 ## Multi-service configuration
 
-A `serve.yml` may use the legacy single-service shape or a `services:` map. In the multi-service shape, `destination`, `networking`, and `retain_containers` are global. The map key is the service identity. The CLI plans one desired state per service and host; `--service` selects one service, while omission deploys all services in deterministic name order.
+A `serve.yml` may use the legacy single-service shape or a `services:` map:
+
+```yaml
+destination: production
+networking:
+  private_network: serve
+retain_containers: 5
+
+services:
+  api:
+    image: ghcr.io/acme/api
+    servers:
+      web:
+        hosts: [deploy@app.example.com]
+        command: ./api
+        app_port: 3000
+    dependencies:
+      redis:
+        image: redis:7-alpine
+        hosts: [deploy@app.example.com]
+        aliases: [cache]
+    proxy:
+      app_role: web
+      hosts: [api.example.com]
+
+  worker:
+    image: ghcr.io/acme/worker
+    servers:
+      jobs:
+        hosts: [deploy@worker.example.com]
+        command: ./worker
+```
+
+Multi-service rules:
+
+- `destination`, `networking`, and `retain_containers` are global and cannot be overridden inside a service.
+- The `services` map key is the service identity; do not also set a nested `service` field.
+- `--service` selects one service. Omitting it deploys all services in deterministic name order.
+- Plan every selected service and host before contacting any host. Applies remain sequential and configuration-wide rollback is not implemented.
+- Role and dependency `hosts` are inline SSH destinations. Replicas are per host.
+- Proxy hostnames must be unique across services, and a name cannot be both a server role and a dependency.
+- Keep the planner focused on one normalized service and host. Multi-service expansion and orchestration belong in config and CLI layers.
 
 ## Environment and secrets
 
