@@ -15,18 +15,20 @@ import (
 )
 
 type Config struct {
-	Service          string                     `yaml:"service"`
-	Image            string                     `yaml:"image"`
-	Destination      string                     `yaml:"destination"`
-	Builder          BuilderConfig              `yaml:"builder"`
-	Servers          map[string]ServerConfig    `yaml:"servers"`
-	Proxy            ProxyConfig                `yaml:"proxy"`
-	Networking       NetworkingConfig           `yaml:"networking"`
-	RetainContainers int                        `yaml:"retain_containers"`
-	Accessories      map[string]AccessoryConfig `yaml:"accessories"`
-	Env              EnvConfig                  `yaml:"env"`
-	Secrets          SecretsConfig              `yaml:"secrets"`
-	Observability    ObservabilityConfig        `yaml:"observability"`
+	Service          string                      `yaml:"service"`
+	Image            string                      `yaml:"image"`
+	Destination      string                      `yaml:"destination"`
+	Builder          BuilderConfig               `yaml:"builder"`
+	Servers          map[string]ServerConfig     `yaml:"servers"`
+	Proxy            ProxyConfig                 `yaml:"proxy"`
+	Networking       NetworkingConfig            `yaml:"networking"`
+	RetainContainers int                         `yaml:"retain_containers"`
+	Dependencies     map[string]DependencyConfig `yaml:"dependencies"`
+	Accessories      map[string]DependencyConfig `yaml:"accessories"`
+	Env              EnvConfig                   `yaml:"env"`
+	Secrets          SecretsConfig               `yaml:"secrets"`
+	Observability    ObservabilityConfig         `yaml:"observability"`
+	dependencyField  string
 }
 
 type BuilderConfig struct {
@@ -79,7 +81,7 @@ type NetworkingConfig struct {
 	PrivateNetwork string `yaml:"private_network"`
 }
 
-type AccessoryConfig struct {
+type DependencyConfig struct {
 	Image        string        `yaml:"image"`
 	Hosts        []string      `yaml:"hosts"`
 	Aliases      []string      `yaml:"aliases"`
@@ -88,6 +90,10 @@ type AccessoryConfig struct {
 	Restart      RestartConfig `yaml:"restart"`
 	Env          EnvConfig     `yaml:"env"`
 }
+
+// AccessoryConfig is kept as a source-compatible alias while accessories is
+// accepted as the deprecated YAML name for dependencies.
+type AccessoryConfig = DependencyConfig
 
 type EnvConfig struct {
 	Plain  map[string]string `yaml:"plain"`
@@ -104,7 +110,11 @@ func HasEnvSecrets(cfg Config) bool {
 	if len(cfg.Env.Secret) > 0 {
 		return true
 	}
-	for _, accessory := range cfg.Accessories {
+	dependencies := cfg.Dependencies
+	if dependencies == nil {
+		dependencies = cfg.Accessories
+	}
+	for _, accessory := range dependencies {
 		if len(accessory.Env.Secret) > 0 {
 			return true
 		}
@@ -172,6 +182,95 @@ func WithDestination(destination string) LoadOption {
 }
 
 func Load(path string, opts ...LoadOption) (Config, error) {
+	merged, err := loadMergedMap(path, opts...)
+	if err != nil {
+		return Config{}, err
+	}
+	return decodeConfig(path, merged)
+}
+
+// LoadServices loads either a legacy single-service config or a multi-service
+// manifest and returns normalized service configs in deterministic name order.
+func LoadServices(path string, opts ...LoadOption) ([]Config, error) {
+	merged, err := loadMergedMap(path, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	rawServices, ok := merged["services"]
+	if !ok {
+		cfg, err := decodeConfig(path, merged)
+		if err != nil {
+			return nil, err
+		}
+		return []Config{cfg}, nil
+	}
+	for _, key := range []string{"service", "image", "builder", "servers", "proxy", "dependencies", "accessories", "env", "secrets", "observability"} {
+		if _, configured := merged[key]; configured {
+			return nil, fmt.Errorf("invalid config: %s cannot be configured beside services", key)
+		}
+	}
+	allowed := map[string]bool{"services": true, "destination": true, "networking": true, "retain_containers": true}
+	for key := range merged {
+		if !allowed[key] {
+			return nil, fmt.Errorf("parse config %q: field %s not found", path, key)
+		}
+	}
+
+	services, ok := rawServices.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("parse config %q: services must be a map", path)
+	}
+	if len(services) == 0 {
+		return nil, fmt.Errorf("invalid config: at least one service is required")
+	}
+
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	configs := make([]Config, 0, len(names))
+	for _, name := range names {
+		service, ok := services[name].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("parse config %q: services.%s must be a map", path, name)
+		}
+		for _, key := range []string{"service", "destination", "networking", "retain_containers"} {
+			if _, configured := service[key]; configured {
+				return nil, fmt.Errorf("invalid config: services.%s.%s must be configured at the top level", name, key)
+			}
+		}
+		normalized := map[string]any{"service": name}
+		for _, key := range []string{"destination", "networking", "retain_containers"} {
+			if value, ok := merged[key]; ok {
+				normalized[key] = value
+			}
+		}
+		for key, value := range service {
+			normalized[key] = value
+		}
+		cfg, err := decodeConfig(path, normalized)
+		if err != nil {
+			return nil, err
+		}
+		configs = append(configs, cfg)
+	}
+
+	proxyHosts := map[string]string{}
+	for _, cfg := range configs {
+		for _, host := range cfg.Proxy.Hosts {
+			if owner, exists := proxyHosts[host]; exists {
+				return nil, fmt.Errorf("invalid config: proxy host %q is configured by both %s and %s", host, owner, cfg.Service)
+			}
+			proxyHosts[host] = cfg.Service
+		}
+	}
+	return configs, nil
+}
+
+func loadMergedMap(path string, opts ...LoadOption) (map[string]any, error) {
 	options := loadOptions{}
 	for _, opt := range opts {
 		opt(&options)
@@ -179,15 +278,15 @@ func Load(path string, opts ...LoadOption) (Config, error) {
 
 	baseBytes, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return Config{}, fmt.Errorf("config file not found: %s", path)
+		return nil, fmt.Errorf("config file not found: %s", path)
 	}
 	if err != nil {
-		return Config{}, fmt.Errorf("read config %q: %w", path, err)
+		return nil, fmt.Errorf("read config %q: %w", path, err)
 	}
 
 	merged, err := decodeMap(path, baseBytes)
 	if err != nil {
-		return Config{}, err
+		return nil, err
 	}
 
 	destination := options.destination
@@ -198,15 +297,24 @@ func Load(path string, opts ...LoadOption) (Config, error) {
 		overlayPath := overlayPath(path, destination)
 		overlayBytes, err := os.ReadFile(overlayPath)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return Config{}, fmt.Errorf("read destination overlay %q: %w", overlayPath, err)
+			return nil, fmt.Errorf("read destination overlay %q: %w", overlayPath, err)
 		}
 		if err == nil {
 			overlay, err := decodeMap(overlayPath, overlayBytes)
 			if err != nil {
-				return Config{}, err
+				return nil, err
 			}
 			merged = deepMerge(merged, overlay)
 		}
+	}
+	return merged, nil
+}
+
+func decodeConfig(path string, merged map[string]any) (Config, error) {
+	_, hasDependencies := merged["dependencies"]
+	_, hasAccessories := merged["accessories"]
+	if hasDependencies && hasAccessories {
+		return Config{}, fmt.Errorf("invalid config: dependencies and accessories cannot both be configured")
 	}
 
 	mergedBytes, err := yaml.Marshal(merged)
@@ -221,11 +329,22 @@ func Load(path string, opts ...LoadOption) (Config, error) {
 		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 	}
 
+	if hasAccessories {
+		cfg.dependencyField = "accessories"
+	} else {
+		cfg.dependencyField = "dependencies"
+	}
+	if cfg.Dependencies == nil {
+		cfg.Dependencies = cfg.Accessories
+	}
+	if cfg.Accessories == nil {
+		cfg.Accessories = cfg.Dependencies
+	}
+
 	applyDefaults(&cfg)
 	if err := validate(cfg); err != nil {
 		return Config{}, err
 	}
-
 	return cfg, nil
 }
 
@@ -335,14 +454,26 @@ func validate(cfg Config) error {
 			problems = append(problems, "servers."+role+".replicas must not be negative")
 		}
 	}
-	for name, accessory := range cfg.Accessories {
+	dependencies := cfg.Dependencies
+	if dependencies == nil {
+		dependencies = cfg.Accessories
+	}
+	dependencyField := cfg.dependencyField
+	if dependencyField == "" {
+		dependencyField = "dependencies"
+	}
+	for name, dependency := range dependencies {
+		path := dependencyField + "." + name
 		if !validIdentifier(name) {
-			problems = append(problems, fmt.Sprintf("accessories.%s must use a valid identifier", name))
+			problems = append(problems, fmt.Sprintf("%s must use a valid identifier", path))
 		}
-		problems = append(problems, validateRestart("accessories."+name+".restart", accessory.Restart)...)
-		problems = append(problems, validateSSHHosts("accessories."+name+".hosts", accessory.Hosts)...)
-		if strings.TrimSpace(accessory.Image) == "" {
-			problems = append(problems, "accessories."+name+".image is required")
+		if _, exists := cfg.Servers[name]; exists {
+			problems = append(problems, fmt.Sprintf("%s cannot be both a server role and a dependency", name))
+		}
+		problems = append(problems, validateRestart(path+".restart", dependency.Restart)...)
+		problems = append(problems, validateSSHHosts(path+".hosts", dependency.Hosts)...)
+		if strings.TrimSpace(dependency.Image) == "" {
+			problems = append(problems, path+".image is required")
 		}
 	}
 

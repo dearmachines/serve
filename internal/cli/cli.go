@@ -211,11 +211,21 @@ func (c *Command) runStatus(ctx context.Context, args []string, stdout io.Writer
 
 // remoteStatus asks each configured host's agent for its status over SSH.
 func (c *Command) remoteStatus(ctx context.Context, configPath string, stdout io.Writer) error {
-	cfg, err := config.Load(configPath)
+	configs, err := config.LoadServices(configPath)
 	if err != nil {
 		return fmt.Errorf("serve status: %w", err)
 	}
-	hosts := configHosts(cfg)
+	seen := map[string]struct{}{}
+	var hosts []string
+	for _, cfg := range configs {
+		for _, host := range configHosts(cfg) {
+			if _, ok := seen[host]; ok {
+				continue
+			}
+			seen[host] = struct{}{}
+			hosts = append(hosts, host)
+		}
+	}
 	if len(hosts) == 0 {
 		return fmt.Errorf("serve status: no hosts configured")
 	}
@@ -1020,56 +1030,101 @@ func (c *Command) runDeploy(ctx context.Context, args []string, stdout io.Writer
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(options.configPath)
+	configs, err := config.LoadServices(options.configPath)
 	if err != nil {
 		return fmt.Errorf("serve deploy: %w", err)
 	}
-	secretsFile, err := secretsFileContent(cfg, options.configPath)
-	if err != nil {
-		return fmt.Errorf("serve deploy: %w", err)
+	if options.service != "" {
+		var selected []config.Config
+		for _, cfg := range configs {
+			if cfg.Service == options.service {
+				selected = append(selected, cfg)
+			}
+		}
+		if len(selected) == 0 {
+			return fmt.Errorf("serve deploy: service %q not found in %s", options.service, options.configPath)
+		}
+		configs = selected
 	}
 	if !options.local {
-		return c.remoteDeploy(ctx, cfg, options, secretsFile, stdout)
+		var deployments []remoteDeployment
+		for _, cfg := range configs {
+			secretsFile, err := secretsFileContent(cfg, options.configPath)
+			if err != nil {
+				return fmt.Errorf("serve deploy: %w", err)
+			}
+			planned, err := planRemoteDeploy(cfg, options, secretsFile)
+			if err != nil {
+				return err
+			}
+			deployments = append(deployments, planned...)
+		}
+		return c.applyRemoteDeployments(ctx, deployments, stdout)
 	}
-	desired, err := planner.Plan(cfg, planner.Options{Host: options.host, Version: options.version, SecretsFileContent: secretsFile})
-	if err != nil {
-		return fmt.Errorf("serve deploy: plan desired state: %w", err)
+	desiredStates := make([]planner.DesiredState, 0, len(configs))
+	for _, cfg := range configs {
+		secretsFile, err := secretsFileContent(cfg, options.configPath)
+		if err != nil {
+			return fmt.Errorf("serve deploy: %w", err)
+		}
+		desired, err := planner.Plan(cfg, planner.Options{Host: options.host, Version: options.version, SecretsFileContent: secretsFile})
+		if err != nil {
+			return fmt.Errorf("serve deploy: plan desired state: %w", err)
+		}
+		desiredStates = append(desiredStates, desired)
 	}
 	rt, err := c.runtimeFactory()
 	if err != nil {
 		return fmt.Errorf("serve deploy: create runtime: %w", err)
 	}
-	if err := applyDesired(ctx, rt, desired, options.stateDir); err != nil {
-		return fmt.Errorf("serve deploy: %w", err)
+	for _, desired := range desiredStates {
+		if err := applyDesired(ctx, rt, desired, options.stateDir); err != nil {
+			return fmt.Errorf("serve deploy: %w", err)
+		}
+		fmt.Fprintf(stdout, "Deployed %s %s %s locally\n", desired.Service, desired.Destination, desired.Version)
 	}
-	fmt.Fprintf(stdout, "Deployed %s %s %s locally\n", desired.Service, desired.Destination, desired.Version)
 	return nil
 }
 
-// remoteDeploy computes per-host desired state and feeds it to a transactional
-// agent apply over SSH. The remote command exits unsuccessfully when cutover
-// fails, and desired state is only promoted after a successful apply.
-func (c *Command) remoteDeploy(ctx context.Context, cfg config.Config, options deployOptions, secretsFile string, stdout io.Writer) error {
+type remoteDeployment struct {
+	host    string
+	desired planner.DesiredState
+	payload []byte
+}
+
+// planRemoteDeploy computes every per-host desired state without contacting a
+// host, allowing the complete manifest to fail validation before deployment.
+func planRemoteDeploy(cfg config.Config, options deployOptions, secretsFile string) ([]remoteDeployment, error) {
 	hosts := configHosts(cfg)
 	if len(hosts) == 0 {
-		return fmt.Errorf("serve deploy: no hosts configured")
+		return nil, fmt.Errorf("serve deploy: no hosts configured for service %s", cfg.Service)
 	}
 
+	deployments := make([]remoteDeployment, 0, len(hosts))
 	for _, host := range hosts {
 		desired, err := planner.Plan(cfg, planner.Options{Host: host, Version: options.version, SecretsFileContent: secretsFile})
 		if err != nil {
-			return fmt.Errorf("serve deploy: plan desired state for %s: %w", host, err)
+			return nil, fmt.Errorf("serve deploy: plan desired state for %s: %w", host, err)
 		}
 		payload, err := json.MarshalIndent(desired, "", "  ")
 		if err != nil {
-			return fmt.Errorf("serve deploy: encode desired state for %s: %w", host, err)
+			return nil, fmt.Errorf("serve deploy: encode desired state for %s: %w", host, err)
 		}
+		deployments = append(deployments, remoteDeployment{host: host, desired: desired, payload: payload})
+	}
+	return deployments, nil
+}
 
+// applyRemoteDeployments feeds precomputed desired states to transactional
+// agent applies over SSH. Each host promotes desired state only after cutover.
+func (c *Command) applyRemoteDeployments(ctx context.Context, deployments []remoteDeployment, stdout io.Writer) error {
+	for _, deployment := range deployments {
 		apply := fmt.Sprintf("sudo serve agent apply /dev/stdin --socket %s", daemon.DefaultSocketPath)
-		if err := c.sshRunner.Run(ctx, host, apply, bytes.NewReader(payload), nil); err != nil {
-			return fmt.Errorf("serve deploy: apply desired state on %s: %w", host, err)
+		if err := c.sshRunner.Run(ctx, deployment.host, apply, bytes.NewReader(deployment.payload), nil); err != nil {
+			return fmt.Errorf("serve deploy: apply desired state on %s: %w", deployment.host, err)
 		}
-		fmt.Fprintf(stdout, "Deployed %s %s %s to %s\n", desired.Service, desired.Destination, desired.Version, host)
+		desired := deployment.desired
+		fmt.Fprintf(stdout, "Deployed %s %s %s to %s\n", desired.Service, desired.Destination, desired.Version, deployment.host)
 	}
 	return nil
 }
@@ -1084,7 +1139,7 @@ func secretsFileContent(cfg config.Config, configPath string) (string, error) {
 	path := filepath.Join(filepath.Dir(configPath), "serve.secrets.yml")
 	contents, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read secrets file %s (required because application or accessory secrets are configured): %w", path, err)
+		return "", fmt.Errorf("read secrets file %s (required because application or dependency secrets are configured): %w", path, err)
 	}
 	return string(contents), nil
 }
@@ -1108,8 +1163,12 @@ func configHosts(cfg config.Config) []string {
 	for _, role := range sortedKeys(cfg.Servers) {
 		add(cfg.Servers[role].Hosts)
 	}
-	for _, name := range sortedKeys(cfg.Accessories) {
-		add(cfg.Accessories[name].Hosts)
+	dependencies := cfg.Dependencies
+	if dependencies == nil {
+		dependencies = cfg.Accessories
+	}
+	for _, name := range sortedKeys(dependencies) {
+		add(dependencies[name].Hosts)
 	}
 	return hosts
 }
@@ -1232,6 +1291,7 @@ func parseAgentApplyOptions(args []string) (agentApplyOptions, error) {
 type deployOptions struct {
 	local      bool
 	configPath string
+	service    string
 	host       string
 	version    string
 	stateDir   string
@@ -1248,6 +1308,12 @@ func parseDeployOptions(args []string) (deployOptions, error) {
 				return options, fmt.Errorf("serve deploy: --config requires a value")
 			}
 			options.configPath = args[i+1]
+			i++
+		case "--service":
+			if i+1 >= len(args) {
+				return options, fmt.Errorf("serve deploy: --service requires a value")
+			}
+			options.service = args[i+1]
 			i++
 		case "--host":
 			if i+1 >= len(args) {

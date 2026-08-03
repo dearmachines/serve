@@ -137,7 +137,7 @@ Notes:
 - Remote deploy assumes the agent is already installed and running on each host (`serve setup` is not implemented yet).
 - Deploys are blue-green: candidates start next to the old version, traffic switches through kamal-proxy only after health passes, old versions are retained per `retain_containers` for rollback.
 - A server role can set `aliases` to provide stable, host-local names on `networking.private_network`. Serve health-gates alias activation when the role has a health check. Alias names must be unique across configurations sharing the network, and direct alias traffic bypasses kamal-proxy's ongoing health routing. See [Private service aliases](private-service-aliases.md).
-- Applications and accessories support `env.plain` values and names listed under `env.secret`. When any `env.secret` is configured, deploy embeds the encrypted `serve.secrets.yml` (SOPS ciphertext) in the desired state; the host agent decrypts it just-in-time with the host's credentials (`sops` binary required on hosts).
+- Applications and dependencies support `env.plain` values and names listed under `env.secret`. When any `env.secret` is configured, deploy embeds the encrypted `serve.secrets.yml` (SOPS ciphertext) in the desired state; the host agent decrypts it just-in-time with the host's credentials (`sops` binary required on hosts).
 - `setup` is registered but not implemented yet.
 
 ## Local smoke test
@@ -205,8 +205,8 @@ serve agent reconcile [--socket PATH]
 serve agent status [--json] [--socket PATH]
 serve agent logs --container NAME [--socket PATH]
 serve agent events [--once] [--socket PATH]
-serve deploy [--config serve.yml] [--version VERSION]
-serve deploy --local [--config serve.yml] [--host localhost] [--version dev] [--state-dir .serve/state]
+serve deploy [--config serve.yml] [--service SERVICE] [--version VERSION]
+serve deploy --local [--config serve.yml] [--service SERVICE] [--host localhost] [--version dev] [--state-dir .serve/state]
 serve status --config serve.yml                  # remote, via each host's agent
 serve logs --host HOST --container NAME          # remote
 serve events --host HOST [--once]                # remote

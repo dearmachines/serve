@@ -189,6 +189,56 @@ func TestPlanIncludesOnlyRolesAndAccessoriesForHost(t *testing.T) {
 	}
 }
 
+func TestPlanIncludesConfiguredDependencies(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Servers = map[string]config.ServerConfig{
+		"web": {Hosts: []string{"app1.example.com"}},
+	}
+	cfg.Dependencies = map[string]config.AccessoryConfig{
+		"database": {Image: "postgres:16-alpine", Hosts: []string{"app1.example.com"}},
+	}
+
+	state, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+
+	if err != nil {
+		t.Fatalf("expected plan, got error: %v", err)
+	}
+	if len(state.Containers) != 2 || state.Containers[1].Role != "database" {
+		t.Fatalf("planned containers = %#v", state.Containers)
+	}
+	if state.Containers[1].ContainerType != "accessory" {
+		t.Fatalf("persisted dependency container type = %q, want compatibility value accessory", state.Containers[1].ContainerType)
+	}
+}
+
+func TestPlanEmbedsSecretsFileForDependencies(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Servers = map[string]config.ServerConfig{
+		"web": {Hosts: []string{"app1.example.com"}},
+	}
+	cfg.Dependencies = map[string]config.AccessoryConfig{
+		"database": {
+			Image: "postgres:16-alpine",
+			Hosts: []string{"app1.example.com"},
+			Env:   config.EnvConfig{Secret: []string{"DATABASE_PASSWORD"}},
+		},
+	}
+	encryptedFile := "DATABASE_PASSWORD: ENC[AES256_GCM,data:ciphertext]\n"
+
+	state, err := planner.Plan(cfg, planner.Options{
+		Host:               "app1.example.com",
+		Version:            "abc123",
+		SecretsFileContent: encryptedFile,
+	})
+
+	if err != nil {
+		t.Fatalf("expected plan, got error: %v", err)
+	}
+	if state.SecretsFile != encryptedFile {
+		t.Fatalf("desired state secrets file = %q", state.SecretsFile)
+	}
+}
+
 func TestPlanMapsAccessoryEnvironmentAndSecrets(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Servers = map[string]config.ServerConfig{

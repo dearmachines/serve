@@ -39,13 +39,13 @@ env:
   secret:
     - DATABASE_URL
 
-accessories:
+dependencies:
   postgres:
     image: postgres:16-alpine
     hosts: [deploy@app.example.com]
     aliases: [database]
     internal_port: 5432
-    # Applied only to this accessory.
+    # Applied only to this dependency.
     env:
       plain:
         POSTGRES_USER: app
@@ -61,6 +61,6 @@ DATABASE_URL: postgres://app:change-me@database:5432/app_production
 POSTGRES_PASSWORD: change-me
 ```
 
-The PostgreSQL snippet demonstrates environment scoping; stateful accessories still follow application deploy and retention lifecycle.
+The PostgreSQL snippet demonstrates environment scoping; stateful dependencies still follow application deploy and retention lifecycle.
 
 See `skills/serve/SKILL.md` for complete examples, scoping rules, security constraints, and the tests required when changing this behavior.

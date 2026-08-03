@@ -174,9 +174,13 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 		}
 	}
 
-	for _, name := range sortedAccessoryNames(cfg.Accessories) {
-		accessory := cfg.Accessories[name]
-		if !hostMatches(accessory.Hosts, opts.Host) {
+	dependencies := cfg.Dependencies
+	if dependencies == nil {
+		dependencies = cfg.Accessories
+	}
+	for _, name := range sortedDependencyNames(dependencies) {
+		dependency := dependencies[name]
+		if !hostMatches(dependency.Hosts, opts.Host) {
 			continue
 		}
 
@@ -184,18 +188,18 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 			Name:          containerName(cfg.Service, name, destination, opts.Version, 1),
 			Role:          name,
 			ContainerType: "accessory",
-			Image:         accessory.Image,
+			Image:         dependency.Image,
 			Replica:       1,
-			Restart:       restart(accessory.Restart),
-			Aliases:       append([]string(nil), accessory.Aliases...),
-			Volumes:       append([]string(nil), accessory.Volumes...),
-			Env:           copyStringMap(accessory.Env.Plain),
+			Restart:       restart(dependency.Restart),
+			Aliases:       append([]string(nil), dependency.Aliases...),
+			Volumes:       append([]string(nil), dependency.Volumes...),
+			Env:           copyStringMap(dependency.Env.Plain),
 			Labels:        labels(cfg.Service, destination, name, opts.Version, 1, "accessory"),
 		}
-		if accessory.InternalPort > 0 {
-			container.Ports = []Port{{Name: "tcp", ContainerPort: accessory.InternalPort}}
+		if dependency.InternalPort > 0 {
+			container.Ports = []Port{{Name: "tcp", ContainerPort: dependency.InternalPort}}
 		}
-		applySecrets(&container, accessory.Env, cfg.Secrets, opts)
+		applySecrets(&container, dependency.Env, cfg.Secrets, opts)
 		container.Labels["serve.spec_hash"] = specHash(container, state.Network, state.SecretsFile)
 		state.Containers = append(state.Containers, container)
 	}
@@ -238,9 +242,9 @@ func sortedServerRoles(servers map[string]config.ServerConfig) []string {
 	return roles
 }
 
-func sortedAccessoryNames(accessories map[string]config.AccessoryConfig) []string {
-	names := make([]string, 0, len(accessories))
-	for name := range accessories {
+func sortedDependencyNames(dependencies map[string]config.DependencyConfig) []string {
+	names := make([]string, 0, len(dependencies))
+	for name := range dependencies {
 		names = append(names, name)
 	}
 	sort.Strings(names)
