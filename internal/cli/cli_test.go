@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -497,6 +498,79 @@ servers:
 	}
 }
 
+func TestLocalDeployAppliesEveryServiceInManifest(t *testing.T) {
+	rt := fake.NewRuntime()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "serve.yml")
+	if err := os.WriteFile(configPath, []byte(`destination: local
+services:
+  api:
+    image: busybox:1.36
+    servers:
+      web:
+        hosts: [localhost]
+        command: sleep 3600
+  worker:
+    image: busybox:1.36
+    servers:
+      jobs:
+        hosts: [localhost]
+        command: sleep 3600
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+
+	exitCode := cmd.Run(context.Background(), []string{"deploy", "--local", "--config", configPath, "--version", "dev", "--state-dir", dir}, io.Discard, io.Discard)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	containers := listManagedContainers(t, rt)
+	byName := map[string]bool{}
+	for _, container := range containers {
+		byName[container.Name] = true
+	}
+	for _, name := range []string{"api-web-local-dev-r1", "worker-jobs-local-dev-r1"} {
+		if !byName[name] {
+			t.Fatalf("missing %s in %#v", name, containers)
+		}
+	}
+}
+
+func TestLocalDeployValidatesEveryServiceBeforeApplying(t *testing.T) {
+	rt := fake.NewRuntime()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "serve.yml")
+	if err := os.WriteFile(configPath, []byte(`destination: local
+services:
+  api:
+    image: busybox:1.36
+    servers:
+      web:
+        hosts: [localhost]
+  worker:
+    image: busybox:1.36
+    servers:
+      jobs:
+        hosts: [localhost]
+    env:
+      secret: [WORKER_TOKEN]
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+
+	exitCode := cmd.Run(context.Background(), []string{"deploy", "--local", "--config", configPath, "--version", "dev", "--state-dir", dir}, io.Discard, io.Discard)
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+	if containers := listManagedContainers(t, rt); len(containers) != 0 {
+		t.Fatalf("validation failure must happen before apply, got %#v", containers)
+	}
+}
+
 func TestRemoteDeployAppliesStateTransactionallyOnEachHost(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "serve.yml")
@@ -542,6 +616,119 @@ servers:
 	}
 	if !strings.Contains(stdout.String(), "app1.example.com") || !strings.Contains(stdout.String(), "app2.example.com") {
 		t.Fatalf("deploy output should report each host, got %q", stdout.String())
+	}
+}
+
+func TestRemoteDeployDeploysEveryServiceInManifest(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "serve.yml")
+	if err := os.WriteFile(configPath, []byte(`destination: production
+services:
+  api:
+    image: ghcr.io/acme/api
+    servers:
+      web:
+        hosts: [app.example.com]
+  worker:
+    image: ghcr.io/acme/worker
+    servers:
+      jobs:
+        hosts: [app.example.com]
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ssh := &recordingSSHRunner{}
+	cmd := cli.New("v1.2.3-test", cli.WithSSHRunner(ssh))
+
+	exitCode := cmd.Run(context.Background(), []string{"deploy", "--config", configPath, "--version", "abc123"}, io.Discard, io.Discard)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	if len(ssh.calls) != 2 {
+		t.Fatalf("expected one apply per service, got %#v", ssh.calls)
+	}
+	var services []string
+	for _, call := range ssh.calls {
+		var desired planner.DesiredState
+		if err := json.Unmarshal([]byte(call.stdin), &desired); err != nil {
+			t.Fatalf("decode desired state: %v", err)
+		}
+		services = append(services, desired.Service)
+	}
+	if !reflect.DeepEqual(services, []string{"api", "worker"}) {
+		t.Fatalf("deployed services = %#v", services)
+	}
+}
+
+func TestRemoteDeploySelectsOneServiceFromManifest(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "serve.yml")
+	if err := os.WriteFile(configPath, []byte(`services:
+  api:
+    image: ghcr.io/acme/api
+    servers:
+      web:
+        hosts: [app.example.com]
+  worker:
+    image: ghcr.io/acme/worker
+    servers:
+      jobs:
+        hosts: [worker.example.com]
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	ssh := &recordingSSHRunner{}
+	cmd := cli.New("v1.2.3-test", cli.WithSSHRunner(ssh))
+
+	exitCode := cmd.Run(context.Background(), []string{"deploy", "--config", configPath, "--service", "worker", "--version", "abc123"}, io.Discard, io.Discard)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	if len(ssh.calls) != 1 || ssh.calls[0].host != "worker.example.com" {
+		t.Fatalf("SSH calls = %#v", ssh.calls)
+	}
+	var desired planner.DesiredState
+	if err := json.Unmarshal([]byte(ssh.calls[0].stdin), &desired); err != nil {
+		t.Fatalf("decode desired state: %v", err)
+	}
+	if desired.Service != "worker" {
+		t.Fatalf("deployed service = %q", desired.Service)
+	}
+}
+
+func TestRemoteDeployValidatesEveryServiceBeforeContactingHosts(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "serve.yml")
+	if err := os.WriteFile(configPath, []byte(`services:
+  api:
+    image: ghcr.io/acme/api
+    servers:
+      web:
+        hosts: [app.example.com]
+  worker:
+    image: ghcr.io/acme/worker
+    servers:
+      jobs:
+        hosts: [worker.example.com]
+    env:
+      secret: [WORKER_TOKEN]
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	ssh := &recordingSSHRunner{}
+	cmd := cli.New("v1.2.3-test", cli.WithSSHRunner(ssh))
+
+	exitCode := cmd.Run(context.Background(), []string{"deploy", "--config", configPath, "--version", "abc123"}, io.Discard, io.Discard)
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+	if len(ssh.calls) != 0 {
+		t.Fatalf("validation failure must happen before host contact, got %#v", ssh.calls)
 	}
 }
 
@@ -678,12 +865,12 @@ env:
 	}
 }
 
-func TestRemoteDeployWithAccessorySecretsExplainsMissingSecretsFile(t *testing.T) {
+func TestRemoteDeployWithDependencySecretsExplainsMissingSecretsFile(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "serve.yml")
 	if err := os.WriteFile(configPath, []byte(`service: my-app
 image: ghcr.io/acme/my-app
-accessories:
+dependencies:
   database:
     image: postgres:16-alpine
     hosts:
@@ -703,7 +890,7 @@ accessories:
 	if exitCode != 1 {
 		t.Fatalf("expected exit code 1, got %d", exitCode)
 	}
-	if !strings.Contains(stderr.String(), "application or accessory secrets are configured") {
+	if !strings.Contains(stderr.String(), "application or dependency secrets are configured") {
 		t.Fatalf("expected error to explain why the secrets file is required, got %q", stderr.String())
 	}
 }
@@ -873,6 +1060,36 @@ servers:
 		if !strings.Contains(stdout.String(), host) {
 			t.Fatalf("expected host header for %s, got %q", host, stdout.String())
 		}
+	}
+}
+
+func TestRemoteStatusVisitsHostsFromEveryService(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "serve.yml")
+	if err := os.WriteFile(configPath, []byte(`services:
+  api:
+    image: ghcr.io/acme/api
+    servers:
+      web:
+        hosts: [app.example.com]
+  worker:
+    image: ghcr.io/acme/worker
+    servers:
+      jobs:
+        hosts: [worker.example.com]
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	ssh := &recordingSSHRunner{}
+	cmd := cli.New("v1.2.3-test", cli.WithSSHRunner(ssh))
+
+	exitCode := cmd.Run(context.Background(), []string{"status", "--config", configPath}, io.Discard, io.Discard)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	if len(ssh.calls) != 2 || ssh.calls[0].host != "app.example.com" || ssh.calls[1].host != "worker.example.com" {
+		t.Fatalf("status SSH calls = %#v", ssh.calls)
 	}
 }
 

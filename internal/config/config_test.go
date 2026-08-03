@@ -28,6 +28,122 @@ func TestLoadMissingFileReturnsClearError(t *testing.T) {
 	}
 }
 
+func TestLoadServicesExpandsMultiServiceManifest(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+destination: production
+networking:
+  private_network: serve
+retain_containers: 3
+services:
+  api:
+    image: ghcr.io/acme/api
+    servers:
+      web:
+        hosts: [app.example.com]
+  worker:
+    image: ghcr.io/acme/worker
+    servers:
+      jobs:
+        hosts: [worker.example.com]
+`)
+
+	services, err := config.LoadServices(path)
+
+	if err != nil {
+		t.Fatalf("expected valid multi-service config, got error: %v", err)
+	}
+	if len(services) != 2 {
+		t.Fatalf("expected two services, got %#v", services)
+	}
+	if services[0].Service != "api" || services[0].Image != "ghcr.io/acme/api" {
+		t.Fatalf("first service = %#v", services[0])
+	}
+	if services[1].Service != "worker" || services[1].Image != "ghcr.io/acme/worker" {
+		t.Fatalf("second service = %#v", services[1])
+	}
+	for _, service := range services {
+		if service.Destination != "production" || service.Networking.PrivateNetwork != "serve" || service.RetainContainers != 3 {
+			t.Fatalf("service did not inherit global settings: %#v", service)
+		}
+	}
+}
+
+func TestLoadServicesRejectsEmptyServiceMap(t *testing.T) {
+	path := writeConfig(t, "serve.yml", "services: {}\n")
+
+	_, err := config.LoadServices(path)
+
+	if err == nil || !strings.Contains(err.Error(), "at least one service") {
+		t.Fatalf("LoadServices error = %v, want empty services error", err)
+	}
+}
+
+func TestLoadServicesRejectsUnknownTopLevelField(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+services:
+  api:
+    image: ghcr.io/acme/api
+unknown: value
+`)
+
+	_, err := config.LoadServices(path)
+
+	if err == nil || !strings.Contains(err.Error(), "field unknown not found") {
+		t.Fatalf("LoadServices error = %v, want unknown field error", err)
+	}
+}
+
+func TestLoadServicesRejectsLegacyApplicationFieldsBesideServices(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+image: ghcr.io/acme/legacy
+services:
+  api:
+    image: ghcr.io/acme/api
+`)
+
+	_, err := config.LoadServices(path)
+
+	if err == nil || !strings.Contains(err.Error(), "image cannot be configured beside services") {
+		t.Fatalf("LoadServices error = %v, want mixed schema error", err)
+	}
+}
+
+func TestLoadServicesRejectsServiceLevelGlobalSettings(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+destination: production
+services:
+  api:
+    image: ghcr.io/acme/api
+    destination: staging
+`)
+
+	_, err := config.LoadServices(path)
+
+	if err == nil || !strings.Contains(err.Error(), "services.api.destination must be configured at the top level") {
+		t.Fatalf("LoadServices error = %v, want service-level global setting error", err)
+	}
+}
+
+func TestLoadServicesRejectsDuplicateProxyHosts(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+services:
+  api:
+    image: ghcr.io/acme/api
+    proxy:
+      hosts: [app.example.com]
+  admin:
+    image: ghcr.io/acme/admin
+    proxy:
+      hosts: [app.example.com]
+`)
+
+	_, err := config.LoadServices(path)
+
+	if err == nil || !strings.Contains(err.Error(), `proxy host "app.example.com" is configured by both admin and api`) {
+		t.Fatalf("LoadServices error = %v, want duplicate proxy host error", err)
+	}
+}
+
 func TestLoadAcceptsMinimalValidConfig(t *testing.T) {
 	path := writeConfig(t, "serve.yml", `
 service: my-app
@@ -359,6 +475,63 @@ servers:
 
 	if err == nil || !strings.Contains(err.Error(), "servers.web.replicas") {
 		t.Fatalf("Load error = %v, want negative replicas error", err)
+	}
+}
+
+func TestLoadParsesDependencies(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+dependencies:
+  database:
+    image: postgres:16-alpine
+    hosts: [app.example.com]
+    aliases: [database]
+`)
+
+	cfg, err := config.Load(path)
+
+	if err != nil {
+		t.Fatalf("expected dependencies to load, got error: %v", err)
+	}
+	dependency, ok := cfg.Dependencies["database"]
+	if !ok || dependency.Image != "postgres:16-alpine" {
+		t.Fatalf("database dependency = %#v", dependency)
+	}
+}
+
+func TestLoadRejectsDependenciesAndAccessoriesTogether(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+dependencies: {}
+accessories: {}
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), "dependencies and accessories cannot both be configured") {
+		t.Fatalf("Load error = %v, want conflicting field error", err)
+	}
+}
+
+func TestLoadRejectsRoleAndDependencyWithSameName(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  database:
+    hosts: [app.example.com]
+dependencies:
+  database:
+    image: postgres:16
+    hosts: [app.example.com]
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), "database cannot be both a server role and a dependency") {
+		t.Fatalf("Load error = %v, want role/dependency collision error", err)
 	}
 }
 

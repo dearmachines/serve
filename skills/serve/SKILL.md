@@ -42,8 +42,8 @@ serve agent reconcile [--socket PATH]
 serve agent status [--json] [--socket PATH]
 serve agent logs --container NAME [--socket PATH]
 serve agent events [--once] [--socket PATH]
-serve deploy [--config serve.yml] [--version VERSION]
-serve deploy --local [--config serve.yml] [--host localhost] [--version dev] [--state-dir .serve/state]
+serve deploy [--config serve.yml] [--service SERVICE] [--version VERSION]
+serve deploy --local [--config serve.yml] [--service SERVICE] [--host localhost] [--version dev] [--state-dir .serve/state]
 serve exec [--host HOST] --container NAME -- CMD [ARGS...]
 ```
 
@@ -199,11 +199,11 @@ networking:
   private_network: serve
 ```
 
-Another container on that host and network can use `http://api:4000`. This supports communication between services deployed from separate configuration files with different top-level images.
+Another container on that host and network can use `http://api:4000`. This supports communication between independently deployed services with different images.
 
 ### Alias behavior and safety rules
 
-- `servers.<role>.aliases` and `accessories.<name>.aliases` are lists of valid identifiers. Aliases cannot conflict between unrelated workloads on the same host and network.
+- `servers.<role>.aliases` and `dependencies.<name>.aliases` are lists of valid identifiers. `accessories` remains a deprecated compatibility alias for dependencies. Network aliases cannot conflict between unrelated workloads on the same host and network.
 - Every replica of a server role receives its aliases, allowing Docker DNS to distribute lookups across active replicas.
 - The planner includes desired aliases in the container spec hash, but the cutover engine must start candidates without server aliases.
 - For aliased roles with health checks, candidates are checked before alias activation and checked again after Docker reconnects their network endpoint.
@@ -213,13 +213,13 @@ Another container on that host and network can use `http://api:4000`. This suppo
 - Docker's container-list response omits custom network aliases. The Docker runtime must inspect listed containers before reporting `ContainerState.Aliases`; do not regress to summary-only alias discovery.
 - Aliases are host-local and require callers and receivers to share `networking.private_network`. They do not provide cross-host discovery.
 - Direct alias traffic bypasses kamal-proxy's ongoing health routing and TLS termination. Do not describe aliases as equivalent to proxy routing.
-- Server roles still share the single top-level `image`, and one config still has one `proxy.app_role`. Use separate configs for different images or public routes.
+- Roles within one normalized service share its `image` and `proxy.app_role`. Use separate entries in `services` when workloads need different images or public routes.
 
 ### Tests for alias changes
 
 Cover the vertical path with red-green-refactor:
 
-1. `internal/config`: strict parsing, invalid aliases, and role/accessory conflicts.
+1. `internal/config`: strict parsing, invalid aliases, and role/dependency conflicts.
 2. `internal/planner`: aliases on every intended replica and spec-hash changes.
 3. `internal/runtime/fake`: state updates and idempotence.
 4. `internal/runtime/docker`: real network alias replacement and aliases returned by `ListContainers` under the `integration` build tag.
@@ -227,9 +227,54 @@ Cover the vertical path with red-green-refactor:
 
 See `docs/private-service-aliases.md` for user-facing configuration and limitations.
 
+## Multi-service configuration
+
+A `serve.yml` may use the legacy single-service shape or a `services:` map:
+
+```yaml
+destination: production
+networking:
+  private_network: serve
+retain_containers: 5
+
+services:
+  api:
+    image: ghcr.io/acme/api
+    servers:
+      web:
+        hosts: [deploy@app.example.com]
+        command: ./api
+        app_port: 3000
+    dependencies:
+      redis:
+        image: redis:7-alpine
+        hosts: [deploy@app.example.com]
+        aliases: [cache]
+    proxy:
+      app_role: web
+      hosts: [api.example.com]
+
+  worker:
+    image: ghcr.io/acme/worker
+    servers:
+      jobs:
+        hosts: [deploy@worker.example.com]
+        command: ./worker
+```
+
+Multi-service rules:
+
+- `destination`, `networking`, and `retain_containers` are global and cannot be overridden inside a service.
+- The `services` map key is the service identity; do not also set a nested `service` field.
+- `--service` selects one service. Omitting it deploys all services in deterministic name order.
+- Plan every selected service and host before contacting any host. Applies remain sequential and configuration-wide rollback is not implemented.
+- Role and dependency `hosts` are inline SSH destinations. Replicas are per host.
+- Proxy hostnames must be unique across services, and a name cannot be both a server role and a dependency.
+- Keep the planner focused on one normalized service and host. Multi-service expansion and orchestration belong in config and CLI layers.
+
 ## Environment and secrets
 
-Applications and accessories use the same `plain`/`secret` shape, but at different scopes.
+Applications and dependencies use the same `plain`/`secret` shape, but at different scopes.
 
 ### Application example
 
@@ -259,12 +304,12 @@ env:
 
 Both `web` and `worker` receive the four variables above.
 
-### Accessory example
+### Dependency example
 
-Nested `env` applies only to that named accessory:
+Nested `env` applies only to that named dependency:
 
 ```yaml
-accessories:
+dependencies:
   postgres:
     image: postgres:16-alpine
     hosts: [deploy@app.example.com]
@@ -280,12 +325,12 @@ accessories:
         - POSTGRES_PASSWORD
 ```
 
-The application does not inherit the PostgreSQL variables. Likewise, the accessory does not inherit top-level application variables. To give the same secret to both, list its name in both `env.secret` lists.
+The application does not inherit the PostgreSQL variables. Likewise, the dependency does not inherit top-level application variables. To give the same secret to both, list its name in both `env.secret` lists.
 
-The schema is image-agnostic. A second accessory can declare a completely different environment:
+The schema is image-agnostic. A second dependency can declare a completely different environment:
 
 ```yaml
-accessories:
+dependencies:
   rabbitmq:
     image: rabbitmq:4-management-alpine
     hosts: [deploy@app.example.com]
@@ -322,20 +367,21 @@ SOPS encrypts the file when the editor closes. Hosts receive ciphertext and must
 
 - `env.plain` must be a map of names to non-sensitive string values.
 - `env.secret` must be a list of names; secret values never belong in `serve.yml`.
-- `env.clear`, a direct `env: {NAME: value}` map, and accessory-level `secrets:` are not supported schemas.
-- Top-level `env` applies to app roles; `accessories.<name>.env` applies only to that accessory.
-- A missing `serve.secrets.yml` must fail before contacting deployment hosts when any app or accessory declares `env.secret`.
+- `env.clear`, a direct `env: {NAME: value}` map, and dependency-level `secrets:` are not supported schemas.
+- Top-level `env` applies to app roles; `dependencies.<name>.env` applies only to that dependency.
+- `accessories:` is a deprecated compatibility alias for `dependencies:`; configuring both is invalid.
+- A missing `serve.secrets.yml` must fail before contacting deployment hosts when any app or dependency declares `env.secret`.
 - Desired state carries the encrypted file, secret references, and names, never decrypted values.
 - Secret material is written to a private tmpfs env file only while Docker creates the container, then deleted.
 - Docker ultimately stores environment values in container metadata, visible to privileged Docker users. File-mounted runtime secrets are not implemented.
-- Container spec hashes include only ciphertext for names that container references. Rotating one secret must not restart unrelated app or accessory containers.
-- Stateful accessories still follow application version, deploy, rollback, and retention behavior. Do not claim database-specific upgrade or zero-downtime semantics.
+- Container spec hashes include only ciphertext for names that container references. Rotating one secret must not restart unrelated app or dependency containers.
+- Stateful dependencies still follow application version, deploy, rollback, and retention behavior. Do not claim database-specific upgrade or zero-downtime semantics.
 
 ### Tests for environment changes
 
 When changing this behavior, cover the vertical path:
 
-1. `internal/config`: strict YAML parsing, app/accessory scope, and rejected field names.
+1. `internal/config`: strict YAML parsing, app/dependency scope, and rejected field names.
 2. `internal/planner`: plain values, secret names, encrypted file delivery, and per-container spec hashes.
 3. `internal/cli`: missing-file failures and remote desired-state payloads.
 4. `internal/agent/reconciler`: just-in-time secret resolution, env-file cleanup, and runtime specs.
@@ -351,9 +397,9 @@ Host provisioning is intentionally out of scope. Docker, the Serve binary, the s
 - The agent is the host orchestrator.
 - Docker is the runtime, not the orchestrator.
 - Systemd should only start the Serve agent, not individual app containers.
-- App/accessory containers are managed through the agent/reconciler.
+- App/dependency containers are managed through the agent/reconciler.
 - Health-gated server aliases are activated by the cutover engine, not exposed when candidate containers are initially created.
-- Plaintext secrets are materialized in tmpfs env files only while Docker creates app or accessory containers; never put them on CLI args or in logs.
+- Plaintext secrets are materialized in tmpfs env files only while Docker creates app or dependency containers; never put them on CLI args or in logs.
 - Do not add host provisioning or installation behavior to `serve setup`.
 
 ## Package map

@@ -91,7 +91,7 @@ networking:
 retain_containers: 5
 ```
 
-The host value is an SSH destination and may include a user, such as `deploy@example.com`. Point the proxy hostnames at the server before enabling automatic TLS.
+Each value under `servers.<role>.hosts` or `dependencies.<name>.hosts` is an SSH destination and may include a user, such as `deploy@example.com`, or an alias from `~/.ssh/config`. Hosts are assigned inline; Serve does not use a separate machine inventory. `replicas` is per host, so two replicas on two hosts creates four containers. Point the proxy hostnames at the servers before enabling automatic TLS.
 
 Push the application image, then deploy its tag:
 
@@ -134,21 +134,43 @@ Run `serve --help` for the complete command list.
 
 ## Multiple applications and domains
 
-Use a separate `serve.yml` for each application. All applications deployed to the same machine share its Serve agent, Docker network, and central `kamal-proxy` container.
-
-One application can answer on multiple domains:
+A `serve.yml` can describe several independently deployable applications. Global destination, networking, and retention settings apply to every service:
 
 ```yaml
-proxy:
-  provider: kamal-proxy
-  app_role: web
-  hosts:
-    - api.x.com
-    - api.you.com
-  ssl: auto
+destination: production
+
+networking:
+  private_network: serve
+
+retain_containers: 5
+
+services:
+  api:
+    image: ghcr.io/acme/api
+    servers:
+      web:
+        hosts:
+          - deploy@app.example.com
+        command: ./api
+        app_port: 3000
+    proxy:
+      app_role: web
+      hosts:
+        - api.example.com
+      ssl: auto
+
+  worker:
+    image: ghcr.io/acme/worker
+    servers:
+      jobs:
+        hosts:
+          - deploy@worker.example.com
+        command: ./worker
 ```
 
-Different applications can also use different domains on the same machine. Keep `service` names and proxy hostnames unique between applications.
+`serve deploy` deploys every service in name order. Pass `--service api` to deploy one service. Existing single-service configuration remains supported. Serve validates and plans every selected service before contacting a host, then applies them in deterministic service and host order. Each host apply is transactional, but the whole file is not: a later failure does not roll back services or hosts already deployed.
+
+All applications deployed to the same machine share its Serve agent, Docker network, and central `kamal-proxy` container. Proxy hostnames must be unique between services. One application can still answer on multiple domains by listing several values under its `proxy.hosts`.
 
 ## Private service aliases
 
@@ -186,7 +208,7 @@ Authenticate Docker to private registries on every deployment host before deploy
 
 ## Environment variables and secrets
 
-Applications and accessories use the same environment shape:
+Applications and dependencies use the same environment shape:
 
 ```yaml
 env:
@@ -198,7 +220,7 @@ env:
 
 - `env.plain` is a map of non-sensitive values stored directly in `serve.yml`, Serve's desired state, and Docker's container configuration.
 - `env.secret` is a list of names resolved from the SOPS-encrypted `serve.secrets.yml` beside `serve.yml`.
-- Top-level `env` applies to every application role. An accessory's nested `env` applies only to that accessory.
+- Top-level `env` applies to every application role. A dependency's nested `env` applies only to that dependency.
 - `env.clear` is not supported.
 
 ### Application environment
@@ -231,12 +253,12 @@ env:
 
 Both `web` and `worker` receive all four variables. The plain values come from `serve.yml`; the two secret values come from `serve.secrets.yml`.
 
-### Accessory environment
+### Dependency environment
 
-Put `env` inside an accessory when only that supporting container needs the values:
+Put `env` inside a dependency when only that supporting container needs the values:
 
 ```yaml
-accessories:
+dependencies:
   postgres:
     image: postgres:16-alpine
     hosts:
@@ -259,7 +281,7 @@ The application does not receive `POSTGRES_USER`, `POSTGRES_DB`, or `POSTGRES_PA
 The schema is generic rather than database-specific. For example, RabbitMQ can define its own plain and secret variables:
 
 ```yaml
-accessories:
+dependencies:
   rabbitmq:
     image: rabbitmq:4-management-alpine
     hosts:
@@ -275,7 +297,7 @@ accessories:
         - RABBITMQ_DEFAULT_PASS
 ```
 
-Each accessory receives only its own nested environment.
+Each dependency receives only its own nested environment. The former `accessories:` field is still accepted for compatibility, but new configurations should use `dependencies:`. Configuring both fields is an error.
 
 ### Create and edit secrets
 
@@ -285,7 +307,7 @@ Configure SOPS and its decryption credentials on the deployment machine and ever
 serve secrets edit --file serve.secrets.yml
 ```
 
-Inside the editor, add the names referenced by every application and accessory. The editor shows decrypted values; SOPS encrypts them when you save:
+Inside the editor, add the names referenced by every application and dependency. The editor shows decrypted values; SOPS encrypts them when you save:
 
 ```yaml
 DATABASE_URL: postgres://billing:change-me@database:5432/billing_production
@@ -300,7 +322,7 @@ Environment secrets ultimately become Docker environment variables and are visib
 
 ### Complete application and PostgreSQL example
 
-> **Stateful accessory lifecycle:** accessories currently follow application versions during deploy and retention. The example below demonstrates environment and secret configuration, but Serve does not yet provide a database-specific upgrade or zero-downtime lifecycle. Use an externally managed database when that lifecycle is required.
+> **Stateful dependency lifecycle:** dependencies currently follow application versions during deploy and retention. The example below demonstrates environment and secret configuration, but Serve does not yet provide a database-specific upgrade or zero-downtime lifecycle. Use an externally managed database when that lifecycle is required.
 
 ```yaml
 service: billing
@@ -330,7 +352,7 @@ env:
     - DATABASE_URL
     - SECRET_KEY_BASE
 
-accessories:
+dependencies:
   postgres:
     image: postgres:16-alpine
     hosts:
@@ -360,7 +382,7 @@ networking:
 retain_containers: 5
 ```
 
-The application connects to PostgreSQL through the `database` network alias. Its `DATABASE_URL` and the accessory's `POSTGRES_PASSWORD` are separate secret entries, even when they contain related credentials.
+The application connects to PostgreSQL through the `database` network alias. Its `DATABASE_URL` and the dependency's `POSTGRES_PASSWORD` are separate secret entries, even when they contain related credentials.
 
 ## Documentation
 

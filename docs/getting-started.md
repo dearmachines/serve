@@ -137,8 +137,68 @@ Notes:
 - Remote deploy assumes the agent is already installed and running on each host (`serve setup` is not implemented yet).
 - Deploys are blue-green: candidates start next to the old version, traffic switches through kamal-proxy only after health passes, old versions are retained per `retain_containers` for rollback.
 - A server role can set `aliases` to provide stable, host-local names on `networking.private_network`. Serve health-gates alias activation when the role has a health check. Alias names must be unique across configurations sharing the network, and direct alias traffic bypasses kamal-proxy's ongoing health routing. See [Private service aliases](private-service-aliases.md).
-- Applications and accessories support `env.plain` values and names listed under `env.secret`. When any `env.secret` is configured, deploy embeds the encrypted `serve.secrets.yml` (SOPS ciphertext) in the desired state; the host agent decrypts it just-in-time with the host's credentials (`sops` binary required on hosts).
+- Applications and dependencies support `env.plain` values and names listed under `env.secret`. When any `env.secret` is configured, deploy embeds the encrypted `serve.secrets.yml` (SOPS ciphertext) in the desired state; the host agent decrypts it just-in-time with the host's credentials (`sops` binary required on hosts).
 - `setup` is registered but not implemented yet.
+
+## Multiple services in one configuration
+
+The legacy top-level `service` and `image` format remains supported. To deploy several independent applications from one file, put them under `services`. The map key becomes each service's identity:
+
+```yaml
+destination: production
+
+networking:
+  private_network: serve
+
+retain_containers: 5
+
+services:
+  api:
+    image: ghcr.io/acme/api
+    servers:
+      web:
+        hosts:
+          - deploy@app-1.example.com
+          - deploy@app-2.example.com
+        command: ./api
+        app_port: 3000
+        replicas: 2
+    dependencies:
+      redis:
+        image: redis:7-alpine
+        hosts:
+          - deploy@app-1.example.com
+        aliases:
+          - cache
+    proxy:
+      app_role: web
+      hosts:
+        - api.example.com
+      ssl: auto
+
+  worker:
+    image: ghcr.io/acme/worker
+    servers:
+      jobs:
+        hosts:
+          - deploy@worker.example.com
+        command: ./worker
+```
+
+`destination`, `networking`, and `retain_containers` are global in this format and cannot be overridden inside a service. Service-specific images, roles, environment, dependencies, and proxy settings remain nested under the service.
+
+Values under role and dependency `hosts` are SSH destinations or aliases from `~/.ssh/config`. They are defined inline rather than in a separate machine inventory. Replicas are per host: `replicas: 2` on two hosts creates four containers.
+
+Deploy all services or select one:
+
+```sh
+serve deploy --config serve.yml --version abc123
+serve deploy --config serve.yml --service api --version abc123
+```
+
+Serve validates and plans all selected services before contacting a host. Applies then run in deterministic service and host order. A host apply is transactional, but the whole configuration is not: if a later apply fails, previously deployed services and hosts remain on the new version.
+
+`dependencies` is the canonical name for application-owned supporting containers. The legacy `accessories` field is accepted for compatibility, but configuring both fields is an error. Dependencies retain the existing application-coupled deployment, rollback, and retention lifecycle.
 
 ## Local smoke test
 
@@ -205,8 +265,8 @@ serve agent reconcile [--socket PATH]
 serve agent status [--json] [--socket PATH]
 serve agent logs --container NAME [--socket PATH]
 serve agent events [--once] [--socket PATH]
-serve deploy [--config serve.yml] [--version VERSION]
-serve deploy --local [--config serve.yml] [--host localhost] [--version dev] [--state-dir .serve/state]
+serve deploy [--config serve.yml] [--service SERVICE] [--version VERSION]
+serve deploy --local [--config serve.yml] [--service SERVICE] [--host localhost] [--version dev] [--state-dir .serve/state]
 serve status --config serve.yml                  # remote, via each host's agent
 serve logs --host HOST --container NAME          # remote
 serve events --host HOST [--once]                # remote
