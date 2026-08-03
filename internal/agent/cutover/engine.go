@@ -99,9 +99,22 @@ func (e *Engine) Apply(ctx context.Context, desired planner.DesiredState) error 
 		return errors.Join(err, e.removeContainers(ctx, desired, created))
 	}
 	created = append(created, createdDependents...)
+	if err := e.waitForHealth(ctx, desired, aliasedContainers(dependents)); err != nil {
+		return errors.Join(err, e.removeContainers(ctx, desired, created))
+	}
+
+	if err := e.activateAliases(ctx, desired); err != nil {
+		return errors.Join(err, e.removeContainers(ctx, desired, created))
+	}
+	if err := e.waitForHealth(ctx, desired, aliasedContainers(desired.Containers)); err != nil {
+		return errors.Join(err, e.removeContainers(ctx, desired, created))
+	}
 
 	if err := e.switchTraffic(ctx, desired, primary); err != nil {
 		return errors.Join(err, e.removeContainers(ctx, desired, created))
+	}
+	if err := e.deactivateOldAliases(ctx, desired, existing); err != nil {
+		return err
 	}
 
 	if err := e.retireOldVersions(ctx, desired, existing); err != nil {
@@ -174,7 +187,9 @@ func splitRoles(containers []planner.Container) (primary []planner.Container, de
 func (e *Engine) startCandidates(ctx context.Context, desired planner.DesiredState, containers []planner.Container) ([]planner.Container, error) {
 	var created []planner.Container
 	for _, container := range containers {
-		result, err := e.deps.Starter.EnsureContainer(ctx, desired, container)
+		candidate := container
+		candidate.Aliases = nil
+		result, err := e.deps.Starter.EnsureContainer(ctx, desired, candidate)
 		if err != nil {
 			return created, err
 		}
@@ -183,6 +198,98 @@ func (e *Engine) startCandidates(ctx context.Context, desired planner.DesiredSta
 		}
 	}
 	return created, nil
+}
+
+func aliasedContainers(containers []planner.Container) []planner.Container {
+	aliased := make([]planner.Container, 0, len(containers))
+	for _, container := range containers {
+		if len(container.Aliases) > 0 {
+			aliased = append(aliased, container)
+		}
+	}
+	return aliased
+}
+
+func (e *Engine) activateAliases(ctx context.Context, desired planner.DesiredState) error {
+	aliased := aliasedContainers(desired.Containers)
+	if len(aliased) == 0 {
+		return nil
+	}
+	if desired.Network == "" {
+		return fmt.Errorf("network is required for server aliases")
+	}
+	if err := e.validateAliasOwnership(ctx, desired, aliased); err != nil {
+		return err
+	}
+	states, err := e.listManaged(ctx, desired)
+	if err != nil {
+		return err
+	}
+	byName := make(map[string]runtime.ContainerState, len(states))
+	for _, state := range states {
+		byName[state.Name] = state
+	}
+	for _, container := range aliased {
+		state, ok := byName[container.Name]
+		if !ok {
+			return fmt.Errorf("activate aliases for %s: container not found", container.Name)
+		}
+		if err := e.deps.Runtime.ReplaceNetworkAliases(ctx, state.ID, desired.Network, container.Aliases); err != nil {
+			return fmt.Errorf("activate aliases for %s: %w", container.Name, err)
+		}
+	}
+	return nil
+}
+
+func (e *Engine) validateAliasOwnership(ctx context.Context, desired planner.DesiredState, aliased []planner.Container) error {
+	requested := map[string]string{}
+	for _, container := range aliased {
+		for _, alias := range container.Aliases {
+			if role, exists := requested[alias]; exists && role != container.Role {
+				return fmt.Errorf("network alias %q is requested by both %s and %s", alias, role, container.Role)
+			}
+			requested[alias] = container.Role
+		}
+	}
+
+	states, err := e.deps.Runtime.ListContainers(ctx, runtime.ContainerFilters{})
+	if err != nil {
+		return err
+	}
+	for _, state := range states {
+		if !state.Running || state.Network != desired.Network {
+			continue
+		}
+		for _, alias := range state.Aliases {
+			role, requestedHere := requested[alias]
+			if !requestedHere {
+				continue
+			}
+			if state.Labels["serve.service"] == desired.Service &&
+				state.Labels["serve.destination"] == desired.Destination &&
+				state.Labels["serve.role"] == role {
+				continue
+			}
+			owner := state.Name
+			if service, ownerRole := state.Labels["serve.service"], state.Labels["serve.role"]; service != "" && ownerRole != "" {
+				owner = service + "/" + ownerRole
+			}
+			return fmt.Errorf("network alias %q is already owned by %s on network %q", alias, owner, desired.Network)
+		}
+	}
+	return nil
+}
+
+func (e *Engine) deactivateOldAliases(ctx context.Context, desired planner.DesiredState, existing []runtime.ContainerState) error {
+	for _, state := range existing {
+		if !state.Running || state.Labels["serve.version"] == desired.Version || state.Network == "" || len(state.Aliases) == 0 {
+			continue
+		}
+		if err := e.deps.Runtime.ReplaceNetworkAliases(ctx, state.ID, state.Network, nil); err != nil {
+			return fmt.Errorf("deactivate aliases for %s: %w", state.Name, err)
+		}
+	}
+	return nil
 }
 
 // waitForHealth polls each candidate with a configured healthcheck until it

@@ -3,6 +3,7 @@ package docker
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -139,7 +140,14 @@ func (r *Runtime) ListContainers(ctx context.Context, containerFilters runtime.C
 
 	states := make([]runtime.ContainerState, 0, len(containers))
 	for _, listed := range containers {
-		states = append(states, listedState(listed))
+		inspect, err := r.client.ContainerInspect(ctx, listed.ID)
+		if errdefs.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		states = append(states, inspectState(inspect))
 	}
 	return states, nil
 }
@@ -251,6 +259,44 @@ func (r *Runtime) RemoveNetwork(ctx context.Context, name string) error {
 	return err
 }
 
+func (r *Runtime) ReplaceNetworkAliases(ctx context.Context, id runtime.ContainerID, networkName string, aliases []string) error {
+	inspect, err := r.client.ContainerInspect(ctx, string(id))
+	if err != nil {
+		return err
+	}
+	if inspect.NetworkSettings == nil {
+		return fmt.Errorf("container %s has no network attachments", inspect.Name)
+	}
+	endpoint, attached := inspect.NetworkSettings.Networks[networkName]
+	if !attached || endpoint == nil {
+		return fmt.Errorf("container %s is not attached to network %s", strings.TrimPrefix(inspect.Name, "/"), networkName)
+	}
+
+	name := strings.TrimPrefix(inspect.Name, "/")
+	current := customNetworkAliases(endpoint.Aliases, inspect.ID, name)
+	if sameAliasSet(current, aliases) {
+		return nil
+	}
+	if err := r.client.NetworkDisconnect(ctx, networkName, string(id), true); err != nil {
+		return fmt.Errorf("disconnect container %s from network %s: %w", name, networkName, err)
+	}
+	if err := r.client.NetworkConnect(ctx, networkName, string(id), &network.EndpointSettings{Aliases: append([]string(nil), aliases...)}); err != nil {
+		restoreErr := r.client.NetworkConnect(ctx, networkName, string(id), &network.EndpointSettings{Aliases: current})
+		return errors.Join(
+			fmt.Errorf("connect container %s to network %s with replacement aliases: %w", name, networkName, err),
+			wrapRestoreAliasesError(name, networkName, restoreErr),
+		)
+	}
+	return nil
+}
+
+func wrapRestoreAliasesError(name string, networkName string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("restore aliases for container %s on network %s: %w", name, networkName, err)
+}
+
 func envMapEntries(values map[string]string) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -355,6 +401,7 @@ func inspectState(inspect dockertypes.ContainerJSON) runtime.ContainerState {
 	}
 	if inspect.NetworkSettings != nil {
 		state.IPAddress = firstNetworkIP(inspect.NetworkSettings.Networks)
+		state.Network, state.Aliases = firstNetworkAttachment(inspect.NetworkSettings.Networks, inspect.ID, state.Name)
 	}
 	if inspect.State != nil {
 		state.Running = inspect.State.Running
@@ -367,24 +414,49 @@ func inspectState(inspect dockertypes.ContainerJSON) runtime.ContainerState {
 	return state
 }
 
-func listedState(listed dockertypes.Container) runtime.ContainerState {
-	name := listed.ID
-	if len(listed.Names) > 0 {
-		name = strings.TrimPrefix(listed.Names[0], "/")
+func firstNetworkAttachment(networks map[string]*network.EndpointSettings, id string, containerName string) (string, []string) {
+	names := make([]string, 0, len(networks))
+	for name := range networks {
+		names = append(names, name)
 	}
-	state := runtime.ContainerState{
-		ID:        runtime.ContainerID(listed.ID),
-		Name:      name,
-		Image:     listed.Image,
-		Labels:    copyStringMap(listed.Labels),
-		Running:   listed.State == "running",
-		Health:    runtime.HealthUnknown,
-		CreatedAt: time.Unix(listed.Created, 0),
+	sort.Strings(names)
+	for _, name := range names {
+		if endpoint := networks[name]; endpoint != nil {
+			return name, customNetworkAliases(endpoint.Aliases, id, containerName)
+		}
 	}
-	if listed.NetworkSettings != nil {
-		state.IPAddress = firstNetworkIP(listed.NetworkSettings.Networks)
+	return "", nil
+}
+
+func customNetworkAliases(aliases []string, id string, containerName string) []string {
+	shortID := id
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
 	}
-	return state
+	custom := make([]string, 0, len(aliases))
+	for _, alias := range aliases {
+		if alias == id || alias == shortID || alias == containerName {
+			continue
+		}
+		custom = append(custom, alias)
+	}
+	return custom
+}
+
+func sameAliasSet(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	a = append([]string(nil), a...)
+	b = append([]string(nil), b...)
+	sort.Strings(a)
+	sort.Strings(b)
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func firstNetworkIP(networks map[string]*network.EndpointSettings) string {

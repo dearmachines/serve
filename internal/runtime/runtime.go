@@ -19,6 +19,7 @@ type Runtime interface {
 	Logs(ctx context.Context, id ContainerID, opts LogOptions) (io.ReadCloser, error)
 	Events(ctx context.Context) (<-chan RuntimeEvent, error)
 	CreateNetwork(ctx context.Context, spec NetworkSpec) error
+	ReplaceNetworkAliases(ctx context.Context, id ContainerID, network string, aliases []string) error
 	ExecContainer(ctx context.Context, id ContainerID, cmd []string) (string, error)
 }
 
@@ -62,6 +63,8 @@ type ContainerState struct {
 	Health    HealthStatus
 	CreatedAt time.Time
 	IPAddress string
+	Network   string
+	Aliases   []string
 }
 
 type HealthStatus string

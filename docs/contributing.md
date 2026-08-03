@@ -91,12 +91,12 @@ cmd/serve                         CLI entrypoint
 internal/cli                      CLI command routing and local command implementations
 internal/config                   serve.yml parser/validator
 internal/planner                  desired-state planner
-internal/runtime                  runtime interface
+internal/runtime                  runtime and network-alias interfaces
 internal/runtime/fake             in-memory runtime for behavior tests
-internal/runtime/docker           Docker Engine implementation
+internal/runtime/docker           Docker Engine and network-alias implementation
 internal/agent/state              desired/actual/last-good state store
 internal/agent/reconciler         desired-state reconciler
-internal/agent/cutover            blue-green cutover engine (health gate, drain, retention)
+internal/agent/cutover            blue-green cutover engine (health, aliases, drain, retention)
 internal/agent/daemon             long-running agent: event loop, reconcile ticker, Unix socket API
 internal/agent/healing            restart/healing supervisor
 internal/agent/health             health checker interfaces/HTTP checker

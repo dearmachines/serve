@@ -83,6 +83,31 @@ func TestPlanCreatesOneWebContainerPerReplicaWithLabels(t *testing.T) {
 	}
 }
 
+func TestPlanAssignsServerAliasesToEveryReplica(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Servers = map[string]config.ServerConfig{
+		"api": {
+			Hosts:    []string{"app1.example.com"},
+			Aliases:  []string{"api", "api.internal"},
+			Replicas: 2,
+		},
+	}
+
+	state, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+
+	if err != nil {
+		t.Fatalf("expected plan, got error: %v", err)
+	}
+	if len(state.Containers) != 2 {
+		t.Fatalf("expected two replicas, got %#v", state.Containers)
+	}
+	for _, container := range state.Containers {
+		if !reflect.DeepEqual(container.Aliases, []string{"api", "api.internal"}) {
+			t.Fatalf("container %s aliases = %#v", container.Name, container.Aliases)
+		}
+	}
+}
+
 func TestPlanRejectsVersionThatCannotBeUsedInAContainerName(t *testing.T) {
 	_, err := planner.Plan(baseConfig(), planner.Options{Host: "app1.example.com", Version: "feature/bad"})
 

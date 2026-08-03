@@ -150,6 +150,36 @@ proxy:
 
 Different applications can also use different domains on the same machine. Keep `service` names and proxy hostnames unique between applications.
 
+## Private service aliases
+
+Server roles can claim stable aliases on the private Docker network. This is useful when separately deployed services on the same machine need to communicate without using public proxy hostnames:
+
+```yaml
+service: billing-api
+image: ghcr.io/acme/billing-api
+
+servers:
+  web:
+    hosts:
+      - deploy@app.example.com
+    aliases:
+      - billing-api
+    app_port: 3000
+    healthcheck:
+      http:
+        path: /up
+        port: 3000
+
+networking:
+  private_network: serve
+```
+
+Another Serve-managed container on that host and network can connect to `http://billing-api:3000`. Every replica of the role receives the alias, so Docker DNS distributes lookups across active replicas.
+
+Serve activates server aliases only after configured health checks pass. During a deployment, healthy old and candidate versions may briefly share the alias before the old version is detached. Without a health check, Serve considers a started container ready for alias activation.
+
+Aliases are host-local: they do not connect services deployed to different machines. Keep aliases unique across all configurations sharing a Docker network; deployment fails if another running container already owns an alias. Direct alias traffic also bypasses kamal-proxy's ongoing health routing, so configure application-level retries and health checks where appropriate.
+
 ## Private images
 
 Authenticate Docker to private registries on every deployment host before deploying. Serve reads the host's standard Docker client configuration, including credential helpers, but does not provision credentials. See [Private registry access](docs/private-registry-access.md).
@@ -335,5 +365,6 @@ The application connects to PostgreSQL through the `database` network alias. Its
 ## Documentation
 
 - [Getting started and command reference](docs/getting-started.md)
+- [Private service aliases](docs/private-service-aliases.md)
 - [Private registry access](docs/private-registry-access.md)
 - [How to contribute](docs/contributing.md)

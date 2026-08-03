@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,6 +37,7 @@ type BuilderConfig struct {
 
 type ServerConfig struct {
 	Hosts       []string          `yaml:"hosts"`
+	Aliases     []string          `yaml:"aliases"`
 	Command     string            `yaml:"command"`
 	AppPort     int               `yaml:"app_port"`
 	Replicas    int               `yaml:"replicas"`
@@ -303,6 +305,25 @@ func validate(cfg Config) error {
 	if cfg.RetainContainers < 0 {
 		problems = append(problems, "retain_containers must not be negative")
 	}
+
+	aliasOwners := map[string]string{}
+	serverRoles := make([]string, 0, len(cfg.Servers))
+	for role := range cfg.Servers {
+		serverRoles = append(serverRoles, role)
+	}
+	sort.Strings(serverRoles)
+	for _, role := range serverRoles {
+		problems = append(problems, validateAliases("servers."+role+".aliases", cfg.Servers[role].Aliases, aliasOwners)...)
+	}
+	accessoryNames := make([]string, 0, len(cfg.Accessories))
+	for name := range cfg.Accessories {
+		accessoryNames = append(accessoryNames, name)
+	}
+	sort.Strings(accessoryNames)
+	for _, name := range accessoryNames {
+		problems = append(problems, validateAliases("accessories."+name+".aliases", cfg.Accessories[name].Aliases, aliasOwners)...)
+	}
+
 	for role, server := range cfg.Servers {
 		if !validIdentifier(role) {
 			problems = append(problems, fmt.Sprintf("servers.%s must use a valid identifier", role))
@@ -350,6 +371,22 @@ func validateSSHHosts(path string, hosts []string) []string {
 
 func validIdentifier(value string) bool {
 	return identifierPattern.MatchString(value)
+}
+
+func validateAliases(path string, aliases []string, owners map[string]string) []string {
+	var problems []string
+	for _, alias := range aliases {
+		if !validIdentifier(alias) {
+			problems = append(problems, path+" must contain only valid identifiers")
+			continue
+		}
+		if owner, exists := owners[alias]; exists {
+			problems = append(problems, fmt.Sprintf("%s: alias %q is also used by %s", path, alias, owner))
+			continue
+		}
+		owners[alias] = path[:strings.LastIndex(path, ".aliases")]
+	}
+	return problems
 }
 
 func validateHealthcheck(path string, check HealthcheckConfig) []string {

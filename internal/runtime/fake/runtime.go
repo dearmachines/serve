@@ -86,6 +86,8 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec runtime.ContainerSpe
 		// even when a test creates several containers back to back.
 		CreatedAt: r.baseTime.Add(time.Duration(r.nextID) * time.Second),
 		IPAddress: r.defaultIP,
+		Network:   spec.Network,
+		Aliases:   append([]string(nil), spec.Aliases...),
 	}
 	return id, nil
 }
@@ -249,6 +251,28 @@ func (r *Runtime) CreateNetwork(ctx context.Context, spec runtime.NetworkSpec) e
 	return nil
 }
 
+func (r *Runtime) ReplaceNetworkAliases(ctx context.Context, id runtime.ContainerID, network string, aliases []string) error {
+	_ = ctx
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	state, ok := r.containers[id]
+	if !ok {
+		return fmt.Errorf("container not found: %s", id)
+	}
+	if state.Network != network {
+		return fmt.Errorf("container %s is not attached to network %s", state.Name, network)
+	}
+	if sameStrings(state.Aliases, aliases) {
+		return nil
+	}
+	state.Aliases = append([]string(nil), aliases...)
+	r.containers[id] = state
+	r.operations = append(r.operations, "replace_network_aliases:"+state.Name+":"+strings.Join(aliases, ","))
+	return nil
+}
+
 func (r *Runtime) ExecContainer(ctx context.Context, id runtime.ContainerID, cmd []string) (string, error) {
 	_ = ctx
 
@@ -360,7 +384,20 @@ func copyContainerState(state runtime.ContainerState) runtime.ContainerState {
 	state.Command = append([]string(nil), state.Command...)
 	state.Labels = copyStringMap(state.Labels)
 	state.EnvFiles = append([]string(nil), state.EnvFiles...)
+	state.Aliases = append([]string(nil), state.Aliases...)
 	return state
+}
+
+func sameStrings(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func copyStringMap(source map[string]string) map[string]string {
