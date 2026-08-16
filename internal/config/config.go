@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/uptimenine/serve/internal/volume"
 	"gopkg.in/yaml.v3"
 )
 
@@ -43,6 +44,7 @@ type ServerConfig struct {
 	Command     string            `yaml:"command"`
 	AppPort     int               `yaml:"app_port"`
 	Replicas    int               `yaml:"replicas"`
+	Volumes     []string          `yaml:"volumes"`
 	Healthcheck HealthcheckConfig `yaml:"healthcheck"`
 	Restart     RestartConfig     `yaml:"restart"`
 }
@@ -450,6 +452,7 @@ func validate(cfg Config) error {
 		problems = append(problems, validateRestart("servers."+role+".restart", server.Restart)...)
 		problems = append(problems, validateHealthcheck("servers."+role+".healthcheck", server.Healthcheck)...)
 		problems = append(problems, validateSSHHosts("servers."+role+".hosts", server.Hosts)...)
+		problems = append(problems, validateVolumes("servers."+role+".volumes", server.Volumes)...)
 		if server.Replicas < 0 {
 			problems = append(problems, "servers."+role+".replicas must not be negative")
 		}
@@ -472,6 +475,7 @@ func validate(cfg Config) error {
 		}
 		problems = append(problems, validateRestart(path+".restart", dependency.Restart)...)
 		problems = append(problems, validateSSHHosts(path+".hosts", dependency.Hosts)...)
+		problems = append(problems, validateVolumes(path+".volumes", dependency.Volumes)...)
 		if strings.TrimSpace(dependency.Image) == "" {
 			problems = append(problems, path+".image is required")
 		}
@@ -518,6 +522,13 @@ func validateAliases(path string, aliases []string, owners map[string]string) []
 		owners[alias] = path[:strings.LastIndex(path, ".aliases")]
 	}
 	return problems
+}
+
+func validateVolumes(path string, volumes []string) []string {
+	if err := volume.ValidateAll(volumes); err != nil {
+		return []string{fmt.Sprintf("%s: %v", path, err)}
+	}
+	return nil
 }
 
 func validateHealthcheck(path string, check HealthcheckConfig) []string {

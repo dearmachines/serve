@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/uptimenine/serve/internal/config"
+	"github.com/uptimenine/serve/internal/volume"
 	"gopkg.in/yaml.v3"
 )
 
@@ -163,6 +164,7 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 				Healthcheck:   healthcheck(server.Healthcheck),
 				Restart:       restart(server.Restart),
 				Aliases:       append([]string(nil), server.Aliases...),
+				Volumes:       append([]string(nil), server.Volumes...),
 				Labels:        labels(cfg.Service, destination, role, opts.Version, replica, "app"),
 			}
 			if server.AppPort > 0 {
@@ -213,6 +215,11 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 func ValidateDesired(desired DesiredState) error {
 	if len(desired.Containers) == 0 {
 		return fmt.Errorf("desired state must contain at least one container")
+	}
+	for _, container := range desired.Containers {
+		if err := volume.ValidateAll(container.Volumes); err != nil {
+			return fmt.Errorf("container %s volumes: %w", container.Name, err)
+		}
 	}
 	return nil
 }

@@ -321,6 +321,47 @@ func TestDockerRuntimePublishesHostPorts(t *testing.T) {
 	}
 }
 
+func TestDockerRuntimeBindMountPersistsContainerWritesOnHost(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rt := newDockerRuntime(t)
+	name := testContainerName(t, "bind-mount")
+	hostDir := t.TempDir()
+
+	if err := rt.PullImage(ctx, testImage); err != nil {
+		t.Fatalf("pull image: %v", err)
+	}
+	events, err := rt.Events(ctx)
+	if err != nil {
+		t.Fatalf("subscribe to events: %v", err)
+	}
+	id, err := rt.CreateContainer(ctx, runtime.ContainerSpec{
+		Name:    name,
+		Image:   testImage,
+		Command: []string{"sh", "-c", "printf 'persisted\\n' >/data/value.txt"},
+		Volumes: []string{hostDir + ":/data"},
+		Labels:  map[string]string{"serve.integration_test": t.Name()},
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	defer removeContainer(t, rt, id)
+
+	if err := rt.StartContainer(ctx, id); err != nil {
+		t.Fatalf("start container: %v", err)
+	}
+	if event := waitForDie(t, ctx, events, id); event.ExitCode != 0 {
+		t.Fatalf("mounted write exited with code %d", event.ExitCode)
+	}
+	contents, err := os.ReadFile(filepath.Join(hostDir, "value.txt"))
+	if err != nil {
+		t.Fatalf("read bind-mounted file: %v", err)
+	}
+	if string(contents) != "persisted\n" {
+		t.Fatalf("bind-mounted file = %q, want persisted data", contents)
+	}
+}
+
 func TestDockerRuntimeAppliesEnvFiles(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
