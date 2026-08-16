@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
@@ -25,6 +26,7 @@ import (
 	"github.com/docker/go-connections/nat"
 
 	"github.com/uptimenine/serve/internal/runtime"
+	"github.com/uptimenine/serve/internal/volume"
 )
 
 type Runtime struct {
@@ -63,6 +65,10 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec runtime.ContainerSpe
 		return "", err
 	}
 	env = append(envMapEntries(spec.Env), env...)
+	mounts, err := containerMounts(spec.Volumes)
+	if err != nil {
+		return "", err
+	}
 	config := &container.Config{
 		Image:        spec.Image,
 		Cmd:          spec.Command,
@@ -71,7 +77,7 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec runtime.ContainerSpe
 		ExposedPorts: exposedPorts(spec.Ports),
 	}
 	hostConfig := &container.HostConfig{
-		Binds:        append([]string(nil), spec.Volumes...),
+		Mounts:       mounts,
 		PortBindings: portBindings(spec.Ports),
 		RestartPolicy: container.RestartPolicy{
 			Name:              container.RestartPolicyMode(spec.Restart.Policy),
@@ -341,6 +347,30 @@ func readEnvFiles(paths []string) ([]string, error) {
 		}
 	}
 	return env, nil
+}
+
+func containerMounts(values []string) ([]mount.Mount, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	mounts := make([]mount.Mount, 0, len(values))
+	for _, value := range values {
+		spec, err := volume.Parse(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid volume mount %q: %w", value, err)
+		}
+		mountType := mount.TypeVolume
+		if strings.HasPrefix(spec.Source, "/") {
+			mountType = mount.TypeBind
+		}
+		mounts = append(mounts, mount.Mount{
+			Type:     mountType,
+			Source:   spec.Source,
+			Target:   spec.Target,
+			ReadOnly: spec.ReadOnly,
+		})
+	}
+	return mounts, nil
 }
 
 func portBindings(ports []runtime.Port) nat.PortMap {

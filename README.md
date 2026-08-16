@@ -202,6 +202,34 @@ Serve activates server aliases only after configured health checks pass. During 
 
 Aliases are host-local: they do not connect services deployed to different machines. Keep aliases unique across all configurations sharing a Docker network; deployment fails if another running container already owns an alias. Direct alias traffic also bypasses kamal-proxy's ongoing health routing, so configure application-level retries and health checks where appropriate.
 
+## Persistent volumes
+
+Application roles and dependencies can mount Docker named volumes or absolute host paths:
+
+```yaml
+servers:
+  web:
+    hosts:
+      - deploy@app.example.com
+    volumes:
+      - billing-uploads:/app/uploads
+      - /srv/billing/config.yml:/app/config.yml:ro
+
+dependencies:
+  postgres:
+    image: postgres:16-alpine
+    hosts:
+      - deploy@app.example.com
+    volumes:
+      - billing-postgres:/var/lib/postgresql/data
+```
+
+Each entry uses `source:/absolute/container/path` with an optional `:ro` or `:rw` suffix. An absolute source is a bind mount and must already exist on the deployment host. Any other valid source is treated as a literal Docker named-volume name. Relative bind sources and duplicate container targets are rejected.
+
+Named volumes are local to each Docker host and survive container replacement, `serve remove`, `serve prune`, and rollback. Serve does not delete volume data, and rollback restores container configuration rather than previous volume contents. Use service-qualified volume names to avoid accidental sharing between configurations on the same host.
+
+Replicas and blue-green versions that use the same named volume access the same data concurrently. In particular, versioned dependencies can briefly overlap during deployment, so a volume mount alone does not provide a safe zero-downtime database lifecycle.
+
 ## Private images
 
 Authenticate Docker to private registries on every deployment host before deploying. Serve reads the host's standard Docker client configuration, including credential helpers, but does not provision credentials. See [Private registry access](docs/private-registry-access.md).

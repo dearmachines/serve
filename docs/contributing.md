@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Go 1.26+
+- Go 1.26.6+
 - Docker, for local Docker commands and integration tests
 - `make`, optional but convenient
 

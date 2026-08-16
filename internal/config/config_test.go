@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -245,6 +246,117 @@ servers:
 
 	if err == nil || !strings.Contains(err.Error(), "servers.web.hosts") {
 		t.Fatalf("Load error = %v, want unsafe host validation error", err)
+	}
+}
+
+func TestLoadParsesServerVolumes(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  web:
+    hosts: [app.example.com]
+    volumes:
+      - app-uploads:/app/uploads
+      - /srv/app/config.yml:/app/config.yml:ro
+      - app-cache:/app/cache:rw
+`)
+
+	cfg, err := config.Load(path)
+
+	if err != nil {
+		t.Fatalf("expected valid server volumes, got error: %v", err)
+	}
+	volumes := cfg.Servers["web"].Volumes
+	want := []string{"app-uploads:/app/uploads", "/srv/app/config.yml:/app/config.yml:ro", "app-cache:/app/cache:rw"}
+	if !reflect.DeepEqual(volumes, want) {
+		t.Fatalf("server volumes = %#v, want %#v", volumes, want)
+	}
+}
+
+func TestLoadRejectsServerVolumeWithoutContainerTarget(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  web:
+    volumes:
+      - app-uploads
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), "servers.web.volumes") {
+		t.Fatalf("Load error = %v, want invalid server volume error", err)
+	}
+}
+
+func TestLoadRejectsServerVolumeWithRelativeContainerTarget(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  web:
+    volumes:
+      - app-uploads:data
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), "container target must be absolute") {
+		t.Fatalf("Load error = %v, want absolute volume target error", err)
+	}
+}
+
+func TestLoadRejectsRelativeBindMountSource(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  web:
+    volumes:
+      - ./data:/app/data
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), "source must be an absolute host path or a valid volume name") {
+		t.Fatalf("Load error = %v, want invalid volume source error", err)
+	}
+}
+
+func TestLoadRejectsUnsupportedServerVolumeOption(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  web:
+    volumes:
+      - app-uploads:/app/uploads:cached
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), "option must be ro or rw") {
+		t.Fatalf("Load error = %v, want unsupported volume option error", err)
+	}
+}
+
+func TestLoadRejectsDuplicateServerVolumeTargets(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  web:
+    volumes:
+      - app-data:/app/data
+      - legacy-data:/app/data:ro
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), `target "/app/data" is configured more than once`) {
+		t.Fatalf("Load error = %v, want duplicate volume target error", err)
 	}
 }
 
@@ -497,6 +609,24 @@ dependencies:
 	dependency, ok := cfg.Dependencies["database"]
 	if !ok || dependency.Image != "postgres:16-alpine" {
 		t.Fatalf("database dependency = %#v", dependency)
+	}
+}
+
+func TestLoadRejectsInvalidDependencyVolume(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+dependencies:
+  database:
+    image: postgres:16-alpine
+    volumes:
+      - database-data
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), "dependencies.database.volumes") {
+		t.Fatalf("Load error = %v, want invalid dependency volume error", err)
 	}
 }
 

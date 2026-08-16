@@ -138,6 +138,7 @@ Notes:
 - Deploys are blue-green: candidates start next to the old version, traffic switches through kamal-proxy only after health passes, old versions are retained per `retain_containers` for rollback.
 - A server role can set `aliases` to provide stable, host-local names on `networking.private_network`. Serve health-gates alias activation when the role has a health check. Alias names must be unique across configurations sharing the network, and direct alias traffic bypasses kamal-proxy's ongoing health routing. See [Private service aliases](private-service-aliases.md).
 - Applications and dependencies support `env.plain` values and names listed under `env.secret`. When any `env.secret` is configured, deploy embeds the encrypted `serve.secrets.yml` (SOPS ciphertext) in the desired state; the host agent decrypts it just-in-time with the host's credentials (`sops` binary required on hosts).
+- Application roles and dependencies support `volumes` entries in `source:/absolute/container/path[:ro|rw]` form. Named volumes survive container removal; absolute bind-mount sources must already exist on the host. Volume contents are not rolled back, and replicas or blue-green versions sharing a volume can access it concurrently.
 - `setup` is registered but not implemented yet.
 
 ## Multiple services in one configuration

@@ -83,6 +83,28 @@ func TestPlanCreatesOneWebContainerPerReplicaWithLabels(t *testing.T) {
 	}
 }
 
+func TestPlanAssignsServerVolumesToEveryReplica(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Servers = map[string]config.ServerConfig{
+		"web": {
+			Hosts:    []string{"app1.example.com"},
+			Replicas: 2,
+			Volumes:  []string{"app-uploads:/app/uploads", "/srv/app/config.yml:/app/config.yml:ro"},
+		},
+	}
+
+	state, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+
+	if err != nil {
+		t.Fatalf("expected plan, got error: %v", err)
+	}
+	for _, container := range state.Containers {
+		if !reflect.DeepEqual(container.Volumes, cfg.Servers["web"].Volumes) {
+			t.Fatalf("container %s volumes = %#v, want %#v", container.Name, container.Volumes, cfg.Servers["web"].Volumes)
+		}
+	}
+}
+
 func TestPlanAssignsServerAliasesToEveryReplica(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Servers = map[string]config.ServerConfig{
@@ -464,6 +486,23 @@ func TestPlanMapsProxyRouteFromConfig(t *testing.T) {
 	}
 	if state.Proxy.DeployTimeout != "45s" || state.Proxy.DrainTimeout != "1m0s" {
 		t.Fatalf("proxy timeouts = %q/%q", state.Proxy.DeployTimeout, state.Proxy.DrainTimeout)
+	}
+}
+
+func TestValidateDesiredRejectsInvalidVolumeMount(t *testing.T) {
+	desired := planner.DesiredState{
+		Service:     "my-app",
+		Destination: "production",
+		Version:     "abc123",
+		Containers: []planner.Container{
+			{Name: "my-app-web-production-abc123-r1", Volumes: []string{"app-data"}},
+		},
+	}
+
+	err := planner.ValidateDesired(desired)
+
+	if err == nil || !strings.Contains(err.Error(), "volumes") {
+		t.Fatalf("ValidateDesired error = %v, want invalid volume error", err)
 	}
 }
 
