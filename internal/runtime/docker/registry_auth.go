@@ -44,7 +44,14 @@ func (p *dockerConfigAuthProvider) RegistryAuth(ctx context.Context, imageRef st
 	if err != nil {
 		return "", fmt.Errorf("resolve Docker credentials for %s: %w", configKey, err)
 	}
-	encoded, err := registrytypes.EncodeAuthConfig(registrytypes.AuthConfig(auth))
+	encoded, err := registrytypes.EncodeAuthConfig(registrytypes.AuthConfig{
+		Username:      auth.Username,
+		Password:      auth.Password,
+		Auth:          auth.Auth,
+		ServerAddress: auth.ServerAddress,
+		IdentityToken: auth.IdentityToken,
+		RegistryToken: auth.RegistryToken,
+	})
 	if err != nil {
 		return "", fmt.Errorf("encode Docker credentials for %s: %w", configKey, err)
 	}
