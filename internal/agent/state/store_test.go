@@ -147,7 +147,13 @@ func desiredState(version string) planner.DesiredState {
 				Role:          "web",
 				ContainerType: "app",
 				Image:         "ghcr.io/acme/my-app:" + version,
-				Replica:       1,
+				Ports: []planner.Port{{
+					Name:          "tcp",
+					ContainerPort: 6379,
+					HostPort:      16379,
+					HostIP:        "127.0.0.1",
+				}},
+				Replica: 1,
 				Labels: map[string]string{
 					"serve.managed":        "true",
 					"serve.service":        "my-app",

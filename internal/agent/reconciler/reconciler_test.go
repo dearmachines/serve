@@ -76,6 +76,30 @@ func TestReconcilePassesClearEnvironmentToRuntime(t *testing.T) {
 	}
 }
 
+func TestReconcilePassesPublishedPortsToRuntime(t *testing.T) {
+	rt := fake.NewRuntime()
+	desired := desiredState("abc123")
+	desired.Containers[0].Ports = []planner.Port{{
+		Name:          "tcp",
+		ContainerPort: 6379,
+		HostPort:      16379,
+		HostIP:        "10.0.0.5",
+	}}
+
+	if _, err := reconciler.New(rt).Reconcile(context.Background(), desired); err != nil {
+		t.Fatalf("reconcile desired state: %v", err)
+	}
+
+	spec, ok := rt.CreatedSpec(desired.Containers[0].Name)
+	if !ok {
+		t.Fatalf("expected runtime spec for %s", desired.Containers[0].Name)
+	}
+	want := []runtime.Port{{Name: "tcp", ContainerPort: 6379, HostPort: 16379, HostIP: "10.0.0.5"}}
+	if !reflect.DeepEqual(spec.Ports, want) {
+		t.Fatalf("runtime ports = %#v, want %#v", spec.Ports, want)
+	}
+}
+
 func TestReconcilePassesDockerRestartPolicyToRuntime(t *testing.T) {
 	rt := fake.NewRuntime()
 	desired := desiredState("abc123")

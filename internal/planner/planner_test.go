@@ -233,6 +233,75 @@ func TestPlanIncludesConfiguredDependencies(t *testing.T) {
 	}
 }
 
+func TestPlanPublishesConfiguredDependencyPort(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Dependencies = map[string]config.DependencyConfig{
+		"redis": {
+			Image:        "redis:8-alpine",
+			Hosts:        []string{"app1.example.com"},
+			InternalPort: 6379,
+			Publish:      &config.DependencyPublishConfig{HostPort: 16379, HostIP: "10.0.0.5"},
+		},
+	}
+
+	state, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+
+	if err != nil {
+		t.Fatalf("expected plan, got error: %v", err)
+	}
+	port := state.Containers[0].Ports
+	want := []planner.Port{{Name: "tcp", ContainerPort: 6379, HostPort: 16379, HostIP: "10.0.0.5"}}
+	if !reflect.DeepEqual(port, want) {
+		t.Fatalf("planned dependency ports = %#v, want %#v", port, want)
+	}
+}
+
+func TestPlanDoesNotPublishDependencyInternalPortByDefault(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Dependencies = map[string]config.DependencyConfig{
+		"redis": {Image: "redis:8-alpine", Hosts: []string{"app1.example.com"}, InternalPort: 6379},
+	}
+
+	state, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+
+	if err != nil {
+		t.Fatalf("expected plan, got error: %v", err)
+	}
+	port := state.Containers[0].Ports
+	want := []planner.Port{{Name: "tcp", ContainerPort: 6379}}
+	if !reflect.DeepEqual(port, want) {
+		t.Fatalf("planned dependency ports = %#v, want unpublished internal port %#v", port, want)
+	}
+}
+
+func TestPlanDependencyPublishChangeUpdatesSpecHash(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Dependencies = map[string]config.DependencyConfig{
+		"redis": {
+			Image:        "redis:8-alpine",
+			Hosts:        []string{"app1.example.com"},
+			InternalPort: 6379,
+			Publish:      &config.DependencyPublishConfig{HostPort: 6379, HostIP: "127.0.0.1"},
+		},
+	}
+
+	first, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+	if err != nil {
+		t.Fatalf("plan first state: %v", err)
+	}
+	cfg.Dependencies["redis"].Publish.HostPort = 16379
+	second, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+	if err != nil {
+		t.Fatalf("plan changed state: %v", err)
+	}
+
+	firstHash := first.Containers[0].Labels["serve.spec_hash"]
+	secondHash := second.Containers[0].Labels["serve.spec_hash"]
+	if firstHash == secondHash {
+		t.Fatalf("dependency publication change did not change spec hash %q", firstHash)
+	}
+}
+
 func TestPlanEmbedsSecretsFileForDependencies(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Servers = map[string]config.ServerConfig{

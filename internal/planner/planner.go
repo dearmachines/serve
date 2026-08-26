@@ -66,6 +66,8 @@ type Container struct {
 type Port struct {
 	Name          string `json:"name"`
 	ContainerPort int    `json:"container_port"`
+	HostPort      int    `json:"host_port,omitempty"`
+	HostIP        string `json:"host_ip,omitempty"`
 }
 
 type Healthcheck struct {
@@ -199,7 +201,15 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 			Labels:        labels(cfg.Service, destination, name, opts.Version, 1, "accessory"),
 		}
 		if dependency.InternalPort > 0 {
-			container.Ports = []Port{{Name: "tcp", ContainerPort: dependency.InternalPort}}
+			port := Port{Name: "tcp", ContainerPort: dependency.InternalPort}
+			if dependency.Publish != nil {
+				port.HostPort = dependency.Publish.HostPort
+				port.HostIP = dependency.Publish.HostIP
+				if port.HostIP == "" {
+					port.HostIP = "127.0.0.1"
+				}
+			}
+			container.Ports = []Port{port}
 		}
 		applySecrets(&container, dependency.Env, cfg.Secrets, opts)
 		container.Labels["serve.spec_hash"] = specHash(container, state.Network, state.SecretsFile)

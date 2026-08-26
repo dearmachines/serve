@@ -310,7 +310,12 @@ func convertPorts(ports []planner.Port) []runtime.Port {
 	}
 	converted := make([]runtime.Port, 0, len(ports))
 	for _, port := range ports {
-		converted = append(converted, runtime.Port{Name: port.Name, ContainerPort: port.ContainerPort})
+		converted = append(converted, runtime.Port{
+			Name:          port.Name,
+			ContainerPort: port.ContainerPort,
+			HostPort:      port.HostPort,
+			HostIP:        port.HostIP,
+		})
 	}
 	return converted
 }
