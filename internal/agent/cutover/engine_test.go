@@ -513,6 +513,51 @@ func TestPublishedDependencyStartupFailureRestartsOldPortOwner(t *testing.T) {
 	}
 }
 
+func TestPostCutoverAliasCleanupFailureKeepsNewVersionServing(t *testing.T) {
+	env := newEnv(t)
+	current := desiredState("abc123", 1, false)
+	current.Containers[0].Aliases = []string{"api"}
+	current.Containers = append(current.Containers, publishedDependency("redis", current.Version))
+	env.deploy(t, current)
+	oldDependency := env.containerByRole(t, current.Version, "redis")
+
+	engine := cutover.New(cutover.Deps{
+		Runtime: &failingAliasCleanupRuntime{Runtime: env.rt}, Starter: reconciler.New(env.rt),
+		Health: env.checker, Proxy: env.proxy, LastGood: env.store, Sleeper: noopSleeper{},
+	})
+	candidate := desiredState("def456", 1, false)
+	candidate.Containers[0].Aliases = []string{"api"}
+	candidate.Containers = append(candidate.Containers, publishedDependency("redis", candidate.Version))
+	env.checker.SetStatus(candidate.Containers[0].Name, health.Healthy)
+	env.rt.ClearOperations()
+
+	err := engine.Apply(context.Background(), candidate)
+
+	if err == nil || !strings.Contains(err.Error(), "alias cleanup failed") {
+		t.Fatalf("Apply error = %v, want alias cleanup failure", err)
+	}
+	active := env.containersByVersion(t, candidate.Version)
+	if len(active) != 2 || !active[0].Running || !active[1].Running {
+		t.Fatalf("new version was torn down after post-cutover cleanup failure: %+v", active)
+	}
+	if restart := operationIndex(env.rt.Operations(), "start_container:"+string(oldDependency.ID)); restart >= 0 {
+		t.Fatalf("old published dependency was restarted after traffic had switched: %v", env.rt.Operations())
+	}
+}
+
+// failingAliasCleanupRuntime fails only the alias-clearing call the engine
+// makes against old containers after traffic has switched.
+type failingAliasCleanupRuntime struct {
+	*fakeruntime.Runtime
+}
+
+func (r *failingAliasCleanupRuntime) ReplaceNetworkAliases(ctx context.Context, id runtime.ContainerID, network string, aliases []string) error {
+	if len(aliases) == 0 {
+		return errors.New("alias cleanup failed")
+	}
+	return r.Runtime.ReplaceNetworkAliases(ctx, id, network, aliases)
+}
+
 func operationIndex(operations []string, want string) int {
 	return operationIndexAfter(operations, want, 0)
 }

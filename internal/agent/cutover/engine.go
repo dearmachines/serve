@@ -118,8 +118,10 @@ func (e *Engine) Apply(ctx context.Context, desired planner.DesiredState) error 
 	if err := e.switchTraffic(ctx, desired, primary); err != nil {
 		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
 	}
+	// Traffic has switched: the deploy is committed, so cleanup failures on
+	// the old version must not tear down the now-live candidate containers.
 	if err := e.deactivateOldAliases(ctx, desired, existing); err != nil {
-		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
+		return err
 	}
 
 	if err := e.retireOldVersions(ctx, desired, existing); err != nil {
