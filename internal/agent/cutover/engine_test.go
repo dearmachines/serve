@@ -39,6 +39,31 @@ func desiredState(version string, webReplicas int, withWorker bool) planner.Desi
 	return state
 }
 
+func publishedDependency(role string, version string) planner.Container {
+	return planner.Container{
+		Name:          fmt.Sprintf("my-app-%s-production-%s-r1", role, version),
+		Role:          role,
+		ContainerType: "accessory",
+		Image:         "redis:8-alpine",
+		Ports: []planner.Port{{
+			Name:          "tcp",
+			ContainerPort: 6379,
+			HostPort:      16379,
+			HostIP:        "127.0.0.1",
+		}},
+		Replica: 1,
+		Labels: map[string]string{
+			"serve.managed":        "true",
+			"serve.service":        "my-app",
+			"serve.destination":    "production",
+			"serve.role":           role,
+			"serve.version":        version,
+			"serve.replica":        "1",
+			"serve.container_type": "accessory",
+		},
+	}
+}
+
 func appContainer(role string, version string, replica int, proxied bool) planner.Container {
 	container := planner.Container{
 		Name:          fmt.Sprintf("my-app-%s-production-%s-r%d", role, version, replica),
@@ -111,6 +136,17 @@ func (e *env) containersByVersion(t *testing.T, version string) []runtime.Contai
 		t.Fatalf("ListContainers: %v", err)
 	}
 	return states
+}
+
+func (e *env) containerByRole(t *testing.T, version string, role string) runtime.ContainerState {
+	t.Helper()
+	for _, state := range e.containersByVersion(t, version) {
+		if state.Labels["serve.role"] == role {
+			return state
+		}
+	}
+	t.Fatalf("container for version %s and role %s not found", version, role)
+	return runtime.ContainerState{}
 }
 
 func TestHealthyCandidateCutsOverAndStopsOldVersion(t *testing.T) {
@@ -417,6 +453,77 @@ func TestDependentStartupFailureKeepsOldVersionServing(t *testing.T) {
 	if candidates := env.containersByVersion(t, "def456"); len(candidates) != 0 {
 		t.Fatalf("failed candidate containers were not cleaned up: %+v", candidates)
 	}
+}
+
+func TestPublishedDependencyStopsOldPortOwnerBeforeStartingCandidate(t *testing.T) {
+	env := newEnv(t)
+	current := desiredState("abc123", 1, false)
+	current.Containers = append(current.Containers, publishedDependency("redis", current.Version))
+	env.deploy(t, current)
+	oldDependency := env.containerByRole(t, current.Version, "redis")
+
+	candidate := desiredState("def456", 1, false)
+	candidate.Containers = append(candidate.Containers, publishedDependency("redis", candidate.Version))
+	env.checker.SetStatus(candidate.Containers[0].Name, health.Healthy)
+	env.rt.ClearOperations()
+
+	if err := env.engine.Apply(context.Background(), candidate); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	operations := env.rt.Operations()
+	stopOld := operationIndex(operations, "stop_container:"+string(oldDependency.ID))
+	createCandidate := operationIndex(operations, "create_container:"+candidate.Containers[1].Name)
+	if stopOld < 0 || createCandidate < 0 || stopOld > createCandidate {
+		t.Fatalf("published dependency was not handed off before candidate start: %v", operations)
+	}
+}
+
+func TestPublishedDependencyStartupFailureRestartsOldPortOwner(t *testing.T) {
+	env := newEnv(t)
+	current := desiredState("abc123", 1, false)
+	current.Containers = append(current.Containers, publishedDependency("redis", current.Version))
+	env.deploy(t, current)
+	oldDependency := env.containerByRole(t, current.Version, "redis")
+
+	starter := &failingStarter{delegate: reconciler.New(env.rt), failAt: 2}
+	engine := cutover.New(cutover.Deps{
+		Runtime: env.rt, Starter: starter, Health: env.checker,
+		Proxy: env.proxy, LastGood: env.store, Sleeper: noopSleeper{},
+	})
+	candidate := desiredState("def456", 1, false)
+	candidate.Containers = append(candidate.Containers, publishedDependency("redis", candidate.Version))
+	env.checker.SetStatus(candidate.Containers[0].Name, health.Healthy)
+	env.rt.ClearOperations()
+
+	err := engine.Apply(context.Background(), candidate)
+
+	if err == nil || !strings.Contains(err.Error(), "start failed") {
+		t.Fatalf("Apply error = %v, want dependency startup failure", err)
+	}
+	old := env.containersByVersion(t, current.Version)
+	if len(old) != 2 || !old[0].Running || !old[1].Running {
+		t.Fatalf("old version was not restored after published dependency failure: %+v", old)
+	}
+	operations := env.rt.Operations()
+	stopOld := operationIndex(operations, "stop_container:"+string(oldDependency.ID))
+	restartOld := operationIndexAfter(operations, "start_container:"+string(oldDependency.ID), stopOld+1)
+	if stopOld < 0 || restartOld < 0 {
+		t.Fatalf("old published dependency was not stopped and restarted: %v", operations)
+	}
+}
+
+func operationIndex(operations []string, want string) int {
+	return operationIndexAfter(operations, want, 0)
+}
+
+func operationIndexAfter(operations []string, want string, start int) int {
+	for index := start; index < len(operations); index++ {
+		if operations[index] == want {
+			return index
+		}
+	}
+	return -1
 }
 
 func TestDependentRolesBootOnlyAfterPrimaryRoleHealthy(t *testing.T) {

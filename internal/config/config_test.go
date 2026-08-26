@@ -612,6 +612,82 @@ dependencies:
 	}
 }
 
+func TestLoadDefaultsDependencyPublishHostIPToLoopback(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+dependencies:
+  redis:
+    image: redis:8-alpine
+    internal_port: 6379
+    publish:
+      host_port: 16379
+`)
+
+	cfg, err := config.Load(path)
+
+	if err != nil {
+		t.Fatalf("expected valid dependency publication, got error: %v", err)
+	}
+	publish := cfg.Dependencies["redis"].Publish
+	if publish == nil {
+		t.Fatal("expected dependency publish configuration")
+	}
+	if publish.HostPort != 16379 || publish.HostIP != "127.0.0.1" {
+		t.Fatalf("dependency publish = %#v, want host port 16379 on loopback", publish)
+	}
+}
+
+func TestLoadParsesExplicitDependencyPublishHostIP(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+dependencies:
+  redis:
+    image: redis:8-alpine
+    internal_port: 6379
+    publish:
+      host_port: 6379
+      host_ip: 10.0.0.5
+`)
+
+	cfg, err := config.Load(path)
+
+	if err != nil {
+		t.Fatalf("expected valid dependency publication, got error: %v", err)
+	}
+	publish := cfg.Dependencies["redis"].Publish
+	if publish == nil || publish.HostPort != 6379 || publish.HostIP != "10.0.0.5" {
+		t.Fatalf("dependency publish = %#v, want explicit private interface binding", publish)
+	}
+}
+
+func TestLoadRejectsInvalidDependencyPublishConfiguration(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		portFields string
+		want       string
+	}{
+		{name: "missing internal port", portFields: "publish:\n      host_port: 6379", want: "internal_port must be between 1 and 65535 when publish is configured"},
+		{name: "negative internal port", portFields: "internal_port: -1", want: "internal_port must be between 1 and 65535"},
+		{name: "out of range internal port", portFields: "internal_port: 65536", want: "internal_port must be between 1 and 65535"},
+		{name: "missing host port", portFields: "internal_port: 6379\n    publish: {}", want: "publish.host_port must be between 1 and 65535"},
+		{name: "negative host port", portFields: "internal_port: 6379\n    publish:\n      host_port: -1", want: "publish.host_port must be between 1 and 65535"},
+		{name: "out of range host port", portFields: "internal_port: 6379\n    publish:\n      host_port: 65536", want: "publish.host_port must be between 1 and 65535"},
+		{name: "invalid host IP", portFields: "internal_port: 6379\n    publish:\n      host_port: 6379\n      host_ip: private-interface", want: "publish.host_ip must be a valid IP address"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeConfig(t, "serve.yml", "service: app\nimage: app\ndependencies:\n  redis:\n    image: redis:8-alpine\n    "+test.portFields+"\n")
+
+			_, err := config.Load(path)
+
+			if err == nil || !strings.Contains(err.Error(), "dependencies.redis."+test.want) {
+				t.Fatalf("Load error = %v, want dependency publication error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidDependencyVolume(t *testing.T) {
 	path := writeConfig(t, "serve.yml", `
 service: app

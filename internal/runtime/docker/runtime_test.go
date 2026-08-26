@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	registrytypes "github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
+	"github.com/docker/go-connections/nat"
 	serveruntime "github.com/uptimenine/serve/internal/runtime"
 )
 
@@ -52,6 +53,36 @@ func TestCreateContainerUsesTypedVolumeAndBindMounts(t *testing.T) {
 	}
 	if len(request.HostConfig.Binds) != 0 {
 		t.Fatalf("Docker legacy binds = %#v, want typed mounts only", request.HostConfig.Binds)
+	}
+}
+
+func TestCreateContainerPublishesConfiguredHostPort(t *testing.T) {
+	var request containertypes.CreateRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode create request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"Id":"container-id","Warnings":[]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := New(dockerClientForServer(t, server)).CreateContainer(context.Background(), serveruntime.ContainerSpec{
+		Name:  "redis",
+		Image: "redis:8-alpine",
+		Ports: []serveruntime.Port{{Name: "tcp", ContainerPort: 6379, HostPort: 16379, HostIP: "10.0.0.5"}},
+	})
+
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	if request.HostConfig == nil {
+		t.Fatal("create request is missing host config")
+	}
+	bindings := request.HostConfig.PortBindings[nat.Port("6379/tcp")]
+	want := []nat.PortBinding{{HostIP: "10.0.0.5", HostPort: "16379"}}
+	if !reflect.DeepEqual(bindings, want) {
+		t.Fatalf("Docker port bindings = %#v, want %#v", bindings, want)
 	}
 }
 

@@ -412,6 +412,30 @@ retain_containers: 5
 
 The application connects to PostgreSQL through the `database` network alias. Its `DATABASE_URL` and the dependency's `POSTGRES_PASSWORD` are separate secret entries, even when they contain related credentials.
 
+## Publish a dependency port on the host
+
+`internal_port` alone keeps a dependency reachable only through Serve's private Docker network. To make that TCP port available on a host interface, add an explicit `publish` block:
+
+```yaml
+dependencies:
+  redis:
+    image: redis:8-alpine
+    hosts:
+      - deploy@services.example.com
+    aliases:
+      - redis
+    internal_port: 6379
+    publish:
+      host_port: 6379
+      host_ip: 10.0.0.5
+```
+
+`publish.host_port` is required when `publish` is present. `publish.host_ip` defaults to `127.0.0.1`; reaching the dependency through a private VM address requires explicitly setting that address. Binding every interface requires the explicit value `0.0.0.0`. Omitting `publish` never creates a host-port binding.
+
+Serve validates the container port, host port, and host IP before contacting a deployment host. The declared binding is part of desired state, so reconciliation and rollback preserve it. Because two containers cannot own the same host binding, a deploy or rollback briefly stops the previous version of a published dependency before starting its replacement; clients should retry transient connection failures.
+
+Serve does not install or configure host/cloud firewalls, authentication, TLS, credentials, or host networking. Those remain operator responsibilities; expose a dependency beyond loopback only inside an independently secured network boundary.
+
 ## Documentation
 
 - [Getting started and command reference](docs/getting-started.md)

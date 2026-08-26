@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -84,13 +85,19 @@ type NetworkingConfig struct {
 }
 
 type DependencyConfig struct {
-	Image        string        `yaml:"image"`
-	Hosts        []string      `yaml:"hosts"`
-	Aliases      []string      `yaml:"aliases"`
-	InternalPort int           `yaml:"internal_port"`
-	Volumes      []string      `yaml:"volumes"`
-	Restart      RestartConfig `yaml:"restart"`
-	Env          EnvConfig     `yaml:"env"`
+	Image        string                   `yaml:"image"`
+	Hosts        []string                 `yaml:"hosts"`
+	Aliases      []string                 `yaml:"aliases"`
+	InternalPort int                      `yaml:"internal_port"`
+	Publish      *DependencyPublishConfig `yaml:"publish"`
+	Volumes      []string                 `yaml:"volumes"`
+	Restart      RestartConfig            `yaml:"restart"`
+	Env          EnvConfig                `yaml:"env"`
+}
+
+type DependencyPublishConfig struct {
+	HostPort int    `yaml:"host_port"`
+	HostIP   string `yaml:"host_ip"`
 }
 
 // AccessoryConfig is kept as a source-compatible alias while accessories is
@@ -397,6 +404,9 @@ func applyDefaults(cfg *Config) {
 	}
 	for name, accessory := range cfg.Accessories {
 		applyRestartDefaults(&accessory.Restart)
+		if accessory.Publish != nil && accessory.Publish.HostIP == "" {
+			accessory.Publish.HostIP = "127.0.0.1"
+		}
 		cfg.Accessories[name] = accessory
 	}
 }
@@ -478,6 +488,19 @@ func validate(cfg Config) error {
 		problems = append(problems, validateVolumes(path+".volumes", dependency.Volumes)...)
 		if strings.TrimSpace(dependency.Image) == "" {
 			problems = append(problems, path+".image is required")
+		}
+		if dependency.Publish != nil {
+			if dependency.InternalPort < 1 || dependency.InternalPort > 65535 {
+				problems = append(problems, path+".internal_port must be between 1 and 65535 when publish is configured")
+			}
+			if dependency.Publish.HostPort < 1 || dependency.Publish.HostPort > 65535 {
+				problems = append(problems, path+".publish.host_port must be between 1 and 65535")
+			}
+			if net.ParseIP(dependency.Publish.HostIP) == nil {
+				problems = append(problems, path+".publish.host_ip must be a valid IP address")
+			}
+		} else if dependency.InternalPort < 0 || dependency.InternalPort > 65535 {
+			problems = append(problems, path+".internal_port must be between 1 and 65535")
 		}
 	}
 

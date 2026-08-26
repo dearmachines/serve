@@ -93,28 +93,33 @@ func (e *Engine) Apply(ctx context.Context, desired planner.DesiredState) error 
 		return errors.Join(err, cleanupErr)
 	}
 
-	createdDependents, err := e.startCandidates(ctx, desired, dependents)
+	stoppedPortOwners, err := e.stopPublishedPortOwners(ctx, desired, dependents, existing)
 	if err != nil {
-		created = append(created, createdDependents...)
-		return errors.Join(err, e.removeContainers(ctx, desired, created))
+		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
 	}
+	markStopped(existing, stoppedPortOwners)
+
+	createdDependents, err := e.startCandidates(ctx, desired, dependents)
 	created = append(created, createdDependents...)
+	if err != nil {
+		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
+	}
 	if err := e.waitForHealth(ctx, desired, aliasedContainers(dependents)); err != nil {
-		return errors.Join(err, e.removeContainers(ctx, desired, created))
+		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
 	}
 
 	if err := e.activateAliases(ctx, desired); err != nil {
-		return errors.Join(err, e.removeContainers(ctx, desired, created))
+		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
 	}
 	if err := e.waitForHealth(ctx, desired, aliasedContainers(desired.Containers)); err != nil {
-		return errors.Join(err, e.removeContainers(ctx, desired, created))
+		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
 	}
 
 	if err := e.switchTraffic(ctx, desired, primary); err != nil {
-		return errors.Join(err, e.removeContainers(ctx, desired, created))
+		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
 	}
 	if err := e.deactivateOldAliases(ctx, desired, existing); err != nil {
-		return err
+		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
 	}
 
 	if err := e.retireOldVersions(ctx, desired, existing); err != nil {
@@ -198,6 +203,56 @@ func (e *Engine) startCandidates(ctx context.Context, desired planner.DesiredSta
 		}
 	}
 	return created, nil
+}
+
+func (e *Engine) stopPublishedPortOwners(ctx context.Context, desired planner.DesiredState, candidates []planner.Container, existing []runtime.ContainerState) ([]runtime.ContainerState, error) {
+	publishedRoles := map[string]bool{}
+	for _, container := range candidates {
+		for _, port := range container.Ports {
+			if port.HostPort > 0 {
+				publishedRoles[container.Role] = true
+				break
+			}
+		}
+	}
+	if len(publishedRoles) == 0 {
+		return nil, nil
+	}
+
+	var stopped []runtime.ContainerState
+	for _, state := range existing {
+		if !state.Running || state.Labels["serve.version"] == desired.Version || !publishedRoles[state.Labels["serve.role"]] {
+			continue
+		}
+		if err := e.deps.Runtime.StopContainer(ctx, state.ID, stopTimeout); err != nil {
+			return stopped, fmt.Errorf("stop existing published port owner %s: %w", state.Name, err)
+		}
+		stopped = append(stopped, state)
+	}
+	return stopped, nil
+}
+
+func markStopped(existing []runtime.ContainerState, stopped []runtime.ContainerState) {
+	stoppedIDs := make(map[runtime.ContainerID]bool, len(stopped))
+	for _, state := range stopped {
+		stoppedIDs[state.ID] = true
+	}
+	for index := range existing {
+		if stoppedIDs[existing[index].ID] {
+			existing[index].Running = false
+		}
+	}
+}
+
+func (e *Engine) failApply(ctx context.Context, desired planner.DesiredState, created []planner.Container, stopped []runtime.ContainerState, cause error) error {
+	cleanupErr := e.removeContainers(ctx, desired, created)
+	var restoreErrors []error
+	for _, state := range stopped {
+		if err := e.deps.Runtime.StartContainer(ctx, state.ID); err != nil {
+			restoreErrors = append(restoreErrors, fmt.Errorf("restart previous published port owner %s: %w", state.Name, err))
+		}
+	}
+	return errors.Join(cause, cleanupErr, errors.Join(restoreErrors...))
 }
 
 func aliasedContainers(containers []planner.Container) []planner.Container {
