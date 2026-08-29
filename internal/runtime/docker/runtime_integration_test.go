@@ -362,6 +362,40 @@ func TestDockerRuntimeBindMountPersistsContainerWritesOnHost(t *testing.T) {
 	}
 }
 
+func TestDockerRuntimePreservesEmptyCommandArgument(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rt := newDockerRuntime(t)
+	name := testContainerName(t, "command-argv")
+
+	if err := rt.PullImage(ctx, testImage); err != nil {
+		t.Fatalf("pull image: %v", err)
+	}
+	events, err := rt.Events(ctx)
+	if err != nil {
+		t.Fatalf("subscribe to events: %v", err)
+	}
+	id, err := rt.CreateContainer(ctx, runtime.ContainerSpec{
+		Name:    name,
+		Image:   testImage,
+		Command: []string{"sh", "-c", `test "$1" = ""`, "serve-command", ""},
+		Labels:  map[string]string{"serve.integration_test": t.Name()},
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	defer removeContainer(t, rt, id)
+
+	if err := rt.StartContainer(ctx, id); err != nil {
+		t.Fatalf("start container: %v", err)
+	}
+
+	event := waitForDie(t, ctx, events, id)
+	if event.ExitCode != 0 {
+		t.Fatalf("expected exact argv command to exit 0, got %#v", event)
+	}
+}
+
 func TestDockerRuntimeAppliesEnvFiles(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

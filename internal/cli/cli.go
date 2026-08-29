@@ -1417,7 +1417,7 @@ servers:
   web:
     hosts:
       - localhost
-    command: ./server
+    command: [./server]
     app_port: 3000
     replicas: 1
 

@@ -159,7 +159,7 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 				Role:          role,
 				ContainerType: "app",
 				Image:         imageWithVersion(cfg.Image, opts.Version),
-				Command:       commandArgv(server.Command),
+				Command:       append([]string(nil), server.Command...),
 				Replica:       replica,
 				Proxy:         role == appRole(cfg),
 				Env:           copyStringMap(cfg.Env.Plain),
@@ -193,6 +193,7 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 			Role:          name,
 			ContainerType: "accessory",
 			Image:         dependency.Image,
+			Command:       append([]string(nil), dependency.Command...),
 			Replica:       1,
 			Restart:       restart(dependency.Restart),
 			Aliases:       append([]string(nil), dependency.Aliases...),
@@ -291,13 +292,6 @@ func imageWithVersion(image string, version string) string {
 		return image
 	}
 	return image + ":" + version
-}
-
-func commandArgv(command string) []string {
-	if strings.TrimSpace(command) == "" {
-		return nil
-	}
-	return strings.Fields(command)
 }
 
 func appRole(cfg config.Config) string {

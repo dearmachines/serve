@@ -56,6 +56,32 @@ func TestCreateContainerUsesTypedVolumeAndBindMounts(t *testing.T) {
 	}
 }
 
+func TestCreateContainerPreservesCommandArguments(t *testing.T) {
+	var request containertypes.CreateRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode create request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"Id":"container-id","Warnings":[]}`)
+	}))
+	t.Cleanup(server.Close)
+	want := []string{"redis-server", "--save", "", "--appendonly", "no"}
+
+	_, err := New(dockerClientForServer(t, server)).CreateContainer(context.Background(), serveruntime.ContainerSpec{
+		Name:    "redis",
+		Image:   "redis:8-alpine",
+		Command: want,
+	})
+
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	if !reflect.DeepEqual([]string(request.Config.Cmd), want) {
+		t.Fatalf("Docker command = %#v, want %#v", request.Config.Cmd, want)
+	}
+}
+
 func TestCreateContainerPublishesConfiguredHostPort(t *testing.T) {
 	var request containertypes.CreateRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

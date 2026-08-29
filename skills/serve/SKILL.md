@@ -145,7 +145,7 @@ servers:
   web:
     hosts:
       - localhost
-    command: sleep 3600
+    command: [sleep, "3600"]
     replicas: 1
 
 networking:
@@ -164,6 +164,10 @@ Clean up:
 ```sh
 docker rm -f demo-web-local-dev-r1
 ```
+
+### Container commands
+
+`servers.<role>.command` and `dependencies.<name>.command` are argument lists passed directly to Docker as `Cmd`; scalar strings are invalid. Omitted or empty commands preserve the image default, and image entrypoints remain in effect. Use an explicit `[/bin/sh, -c, SCRIPT]` argument list when shell operators or runtime environment expansion are required. Commands are non-secret desired-state configuration: Serve must not interpolate them or persist plaintext secret values in them.
 
 Apply a desired state JSON directly:
 
@@ -243,7 +247,7 @@ services:
     servers:
       web:
         hosts: [deploy@app.example.com]
-        command: ./api
+        command: [./api]
         app_port: 3000
     dependencies:
       redis:
@@ -259,7 +263,7 @@ services:
     servers:
       jobs:
         hosts: [deploy@worker.example.com]
-        command: ./worker
+        command: [./worker]
 ```
 
 Multi-service rules:
@@ -287,11 +291,11 @@ image: ghcr.io/acme/api
 servers:
   web:
     hosts: [deploy@app.example.com]
-    command: ./api
+    command: [./api]
     app_port: 3000
   worker:
     hosts: [deploy@app.example.com]
-    command: ./worker
+    command: [./worker]
 
 env:
   plain:

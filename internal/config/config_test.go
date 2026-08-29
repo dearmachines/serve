@@ -590,6 +590,118 @@ servers:
 	}
 }
 
+func TestLoadParsesServerCommandAsArgv(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  web:
+    command: [./server, --port, "3000"]
+`)
+
+	cfg, err := config.Load(path)
+
+	if err != nil {
+		t.Fatalf("expected server command to load, got error: %v", err)
+	}
+	want := []string{"./server", "--port", "3000"}
+	if !reflect.DeepEqual([]string(cfg.Servers["web"].Command), want) {
+		t.Fatalf("server command = %#v, want %#v", cfg.Servers["web"].Command, want)
+	}
+}
+
+func TestLoadRejectsScalarServerCommand(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  web:
+    command: ./server --port 3000
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), "command must be a list of strings") {
+		t.Fatalf("Load error = %v, want scalar server command type error", err)
+	}
+}
+
+func TestLoadParsesDependencyCommandAsArgv(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+dependencies:
+  redis:
+    image: redis:8-alpine
+    command: [redis-server, --save, "", --appendonly, "no"]
+`)
+
+	cfg, err := config.Load(path)
+
+	if err != nil {
+		t.Fatalf("expected dependency command to load, got error: %v", err)
+	}
+	want := []string{"redis-server", "--save", "", "--appendonly", "no"}
+	if !reflect.DeepEqual([]string(cfg.Dependencies["redis"].Command), want) {
+		t.Fatalf("dependency command = %#v, want %#v", cfg.Dependencies["redis"].Command, want)
+	}
+}
+
+func TestLoadParsesAccessoryCommandAsArgv(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+accessories:
+  redis:
+    image: redis:8-alpine
+    command: [redis-server, --appendonly, "no"]
+`)
+
+	cfg, err := config.Load(path)
+
+	if err != nil {
+		t.Fatalf("expected accessory command to load, got error: %v", err)
+	}
+	want := []string{"redis-server", "--appendonly", "no"}
+	if !reflect.DeepEqual([]string(cfg.Accessories["redis"].Command), want) {
+		t.Fatalf("accessory command = %#v, want %#v", cfg.Accessories["redis"].Command, want)
+	}
+}
+
+func TestLoadRejectsScalarDependencyCommand(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+dependencies:
+  redis:
+    image: redis:8-alpine
+    command: redis-server --appendonly no
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), "command must be a list of strings") {
+		t.Fatalf("Load error = %v, want scalar dependency command type error", err)
+	}
+}
+
+func TestLoadRejectsNonStringCommandArgument(t *testing.T) {
+	path := writeConfig(t, "serve.yml", `
+service: app
+image: app
+dependencies:
+  redis:
+    image: redis:8-alpine
+    command: [redis-server, 123]
+`)
+
+	_, err := config.Load(path)
+
+	if err == nil || !strings.Contains(err.Error(), "command arguments must be strings") {
+		t.Fatalf("Load error = %v, want non-string command argument error", err)
+	}
+}
+
 func TestLoadParsesDependencies(t *testing.T) {
 	path := writeConfig(t, "serve.yml", `
 service: app
