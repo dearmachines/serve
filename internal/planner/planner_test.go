@@ -16,7 +16,7 @@ func TestPlanCreatesOneWebContainerPerReplicaWithLabels(t *testing.T) {
 	cfg.Servers = map[string]config.ServerConfig{
 		"web": {
 			Hosts:    []string{"app1.example.com"},
-			Command:  "./server",
+			Command:  []string{"./server"},
 			AppPort:  3000,
 			Replicas: 2,
 			Restart:  config.RestartConfig{Policy: "always", Controller: "agent"},
@@ -156,13 +156,13 @@ func TestPlanIncludesOnlyRolesAndAccessoriesForHost(t *testing.T) {
 	cfg.Servers = map[string]config.ServerConfig{
 		"web": {
 			Hosts:    []string{"app1.example.com"},
-			Command:  "./server",
+			Command:  []string{"./server"},
 			AppPort:  3000,
 			Replicas: 1,
 		},
 		"worker": {
 			Hosts:    []string{"worker1.example.com"},
-			Command:  "./worker",
+			Command:  []string{"./worker"},
 			Replicas: 1,
 		},
 	}
@@ -230,6 +230,91 @@ func TestPlanIncludesConfiguredDependencies(t *testing.T) {
 	}
 	if state.Containers[1].ContainerType != "accessory" {
 		t.Fatalf("persisted dependency container type = %q, want compatibility value accessory", state.Containers[1].ContainerType)
+	}
+}
+
+func TestPlanIncludesConfiguredDependencyCommand(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Dependencies = map[string]config.DependencyConfig{
+		"redis": {
+			Image:   "redis:8-alpine",
+			Hosts:   []string{"app1.example.com"},
+			Command: []string{"redis-server", "--save", "", "--appendonly", "no"},
+		},
+	}
+
+	state, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+
+	if err != nil {
+		t.Fatalf("expected plan, got error: %v", err)
+	}
+	want := []string{"redis-server", "--save", "", "--appendonly", "no"}
+	if !reflect.DeepEqual(state.Containers[0].Command, want) {
+		t.Fatalf("planned dependency command = %#v, want %#v", state.Containers[0].Command, want)
+	}
+}
+
+func TestPlanOmitsDependencyCommandToPreserveImageDefault(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Dependencies = map[string]config.DependencyConfig{
+		"redis": {Image: "redis:8-alpine", Hosts: []string{"app1.example.com"}},
+	}
+
+	state, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+
+	if err != nil {
+		t.Fatalf("expected plan, got error: %v", err)
+	}
+	if state.Containers[0].Command != nil {
+		t.Fatalf("planned dependency command = %#v, want image default", state.Containers[0].Command)
+	}
+}
+
+func TestPlanIncludesConfiguredAccessoryCommand(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Accessories = map[string]config.AccessoryConfig{
+		"redis": {
+			Image:   "redis:8-alpine",
+			Hosts:   []string{"app1.example.com"},
+			Command: []string{"redis-server", "--appendonly", "no"},
+		},
+	}
+
+	state, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+
+	if err != nil {
+		t.Fatalf("expected plan, got error: %v", err)
+	}
+	want := []string{"redis-server", "--appendonly", "no"}
+	if !reflect.DeepEqual(state.Containers[0].Command, want) {
+		t.Fatalf("planned accessory command = %#v, want %#v", state.Containers[0].Command, want)
+	}
+}
+
+func TestPlanDependencyCommandChangeUpdatesSpecHash(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Dependencies = map[string]config.DependencyConfig{
+		"redis": {
+			Image:   "redis:8-alpine",
+			Hosts:   []string{"app1.example.com"},
+			Command: []string{"redis-server", "--appendonly", "no"},
+		},
+	}
+
+	first, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+	if err != nil {
+		t.Fatalf("plan first state: %v", err)
+	}
+	cfg.Dependencies["redis"].Command[2] = "yes"
+	second, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+	if err != nil {
+		t.Fatalf("plan changed state: %v", err)
+	}
+
+	firstHash := first.Containers[0].Labels["serve.spec_hash"]
+	secondHash := second.Containers[0].Labels["serve.spec_hash"]
+	if firstHash == secondHash {
+		t.Fatalf("dependency command change did not change spec hash %q", firstHash)
 	}
 }
 
@@ -421,7 +506,7 @@ func TestPlanScopesSecretChangesToContainersThatUseThem(t *testing.T) {
 func TestPlanSpecHashChangesWhenContainerConfigurationChanges(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Servers = map[string]config.ServerConfig{
-		"web": {Hosts: []string{"app1.example.com"}, Command: "./server", Replicas: 1},
+		"web": {Hosts: []string{"app1.example.com"}, Command: []string{"./server"}, Replicas: 1},
 	}
 
 	first, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
@@ -449,7 +534,7 @@ func TestPlanEmbedsSecretCiphertextReferenceWithoutPlaintext(t *testing.T) {
 	cfg.Servers = map[string]config.ServerConfig{
 		"web": {
 			Hosts:    []string{"app1.example.com"},
-			Command:  "./server",
+			Command:  []string{"./server"},
 			Replicas: 1,
 		},
 	}
@@ -493,7 +578,7 @@ func TestPlanEmbedsSecretCiphertextReferenceWithoutPlaintext(t *testing.T) {
 func TestPlanEmbedsEncryptedSecretsFileForRemoteDecryption(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Servers = map[string]config.ServerConfig{
-		"web": {Hosts: []string{"app1.example.com"}, Command: "./server", Replicas: 1},
+		"web": {Hosts: []string{"app1.example.com"}, Command: []string{"./server"}, Replicas: 1},
 	}
 	cfg.Env.Secret = []string{"DATABASE_URL"}
 	encryptedFile := "DATABASE_URL: ENC[AES256_GCM,data:database-ciphertext]\nsops:\n  kms: []\n"
@@ -515,7 +600,7 @@ func TestPlanEmbedsEncryptedSecretsFileForRemoteDecryption(t *testing.T) {
 func TestPlanOmitsSecretsFileWhenNoSecretsConfigured(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Servers = map[string]config.ServerConfig{
-		"web": {Hosts: []string{"app1.example.com"}, Command: "./server", Replicas: 1},
+		"web": {Hosts: []string{"app1.example.com"}, Command: []string{"./server"}, Replicas: 1},
 	}
 
 	state, err := planner.Plan(cfg, planner.Options{
@@ -535,7 +620,7 @@ func TestPlanOmitsSecretsFileWhenNoSecretsConfigured(t *testing.T) {
 func TestPlanMapsProxyRouteFromConfig(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Servers = map[string]config.ServerConfig{
-		"web": {Hosts: []string{"app1.example.com"}, Command: "./server", Replicas: 1},
+		"web": {Hosts: []string{"app1.example.com"}, Command: []string{"./server"}, Replicas: 1},
 	}
 	cfg.Proxy.Hosts = []string{"app.example.com"}
 	cfg.Proxy.SSL = "auto"

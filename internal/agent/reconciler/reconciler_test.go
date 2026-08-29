@@ -76,6 +76,25 @@ func TestReconcilePassesClearEnvironmentToRuntime(t *testing.T) {
 	}
 }
 
+func TestReconcilePassesDependencyCommandToRuntime(t *testing.T) {
+	rt := fake.NewRuntime()
+	desired := desiredState("abc123")
+	desired.Containers[0].ContainerType = "accessory"
+	desired.Containers[0].Command = []string{"redis-server", "--save", "", "--appendonly", "no"}
+
+	if _, err := reconciler.New(rt).Reconcile(context.Background(), desired); err != nil {
+		t.Fatalf("reconcile desired state: %v", err)
+	}
+
+	spec, ok := rt.CreatedSpec(desired.Containers[0].Name)
+	if !ok {
+		t.Fatalf("expected runtime spec for %s", desired.Containers[0].Name)
+	}
+	if !reflect.DeepEqual(spec.Command, desired.Containers[0].Command) {
+		t.Fatalf("runtime command = %#v, want %#v", spec.Command, desired.Containers[0].Command)
+	}
+}
+
 func TestReconcilePassesPublishedPortsToRuntime(t *testing.T) {
 	rt := fake.NewRuntime()
 	desired := desiredState("abc123")

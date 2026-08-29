@@ -13,9 +13,10 @@ import (
 func TestFakeRuntimeRecordsStartedContainersAsRunning(t *testing.T) {
 	rt := fake.NewRuntime()
 	id, err := rt.CreateContainer(context.Background(), runtime.ContainerSpec{
-		Name:   "my-app-web-production-abc123-r1",
-		Image:  "ghcr.io/acme/my-app:abc123",
-		Labels: map[string]string{"serve.managed": "true", "serve.role": "web"},
+		Name:    "my-app-web-production-abc123-r1",
+		Image:   "ghcr.io/acme/my-app:abc123",
+		Command: []string{"./server", "--port", "3000"},
+		Labels:  map[string]string{"serve.managed": "true", "serve.role": "web"},
 	})
 	if err != nil {
 		t.Fatalf("create container: %v", err)
@@ -34,6 +35,9 @@ func TestFakeRuntimeRecordsStartedContainersAsRunning(t *testing.T) {
 	}
 	if state.Name != "my-app-web-production-abc123-r1" || state.Image != "ghcr.io/acme/my-app:abc123" {
 		t.Fatalf("unexpected inspected state: %#v", state)
+	}
+	if !reflect.DeepEqual(state.Command, []string{"./server", "--port", "3000"}) {
+		t.Fatalf("inspected command = %#v", state.Command)
 	}
 }
 

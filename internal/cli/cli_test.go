@@ -450,7 +450,7 @@ servers:
   web:
     hosts:
       - localhost
-    command: ./server
+    command: [./server]
     app_port: 3000
     replicas: 1
 `), 0o644); err != nil {
@@ -509,13 +509,13 @@ services:
     servers:
       web:
         hosts: [localhost]
-        command: sleep 3600
+        command: [sleep, "3600"]
   worker:
     image: busybox:1.36
     servers:
       jobs:
         hosts: [localhost]
-        command: sleep 3600
+        command: [sleep, "3600"]
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -582,7 +582,7 @@ servers:
     hosts:
       - app1.example.com
       - app2.example.com
-    command: ./server
+    command: [./server]
     app_port: 3000
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -742,7 +742,7 @@ servers:
   web:
     hosts:
       - app1.example.com
-    command: ./server
+    command: [./server]
     app_port: 3000
 env:
   secret:
@@ -839,7 +839,7 @@ servers:
   web:
     hosts:
       - app1.example.com
-    command: ./server
+    command: [./server]
     app_port: 3000
 env:
   secret:
@@ -906,7 +906,7 @@ servers:
     hosts:
       - app1.example.com
       - app2.example.com
-    command: ./server
+    command: [./server]
     app_port: 3000
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -1032,7 +1032,7 @@ servers:
     hosts:
       - app1.example.com
       - app2.example.com
-    command: ./server
+    command: [./server]
     app_port: 3000
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -1328,7 +1328,7 @@ destination: production
 servers:
   web:
     hosts: [localhost]
-    command: ./server
+    command: [./server]
     app_port: 3000
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -1369,6 +1369,63 @@ servers:
 		}
 	}
 	t.Fatalf("previous version v1 is not running after rollback: %#v", containers)
+}
+
+func TestRollbackRestoresPreviousDependencyCommand(t *testing.T) {
+	rt := fake.NewRuntime()
+	stateDir := t.TempDir()
+	configPath := filepath.Join(stateDir, "serve.yml")
+	writeDependencyConfig := func(command string) {
+		t.Helper()
+		contents := fmt.Sprintf(`service: my-app
+image: busybox:1.36
+destination: production
+dependencies:
+  redis:
+    image: redis:8-alpine
+    hosts: [localhost]
+    command: [redis-server, --appendonly, %q]
+`, command)
+		if err := os.WriteFile(configPath, []byte(contents), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	for _, deploy := range []struct {
+		version string
+		command string
+	}{
+		{version: "v1", command: "no"},
+		{version: "v2", command: "yes"},
+	} {
+		writeDependencyConfig(deploy.command)
+		exitCode := cmd.Run(context.Background(), []string{
+			"deploy", "--local", "--config", configPath, "--host", "localhost",
+			"--version", deploy.version, "--state-dir", stateDir,
+		}, io.Discard, io.Discard)
+		if exitCode != 0 {
+			t.Fatalf("deploy %s exit code = %d", deploy.version, exitCode)
+		}
+	}
+
+	exitCode := cmd.Run(context.Background(), []string{
+		"rollback", "--service", "my-app", "--destination", "production", "--state-dir", stateDir,
+	}, io.Discard, io.Discard)
+	if exitCode != 0 {
+		t.Fatalf("rollback exit code = %d", exitCode)
+	}
+
+	for _, container := range listManagedContainers(t, rt) {
+		if container.Labels["serve.container_type"] != "accessory" || container.Labels["serve.version"] != "v1" || !container.Running {
+			continue
+		}
+		want := []string{"redis-server", "--appendonly", "no"}
+		if !reflect.DeepEqual(container.Command, want) {
+			t.Fatalf("rolled-back dependency command = %#v, want %#v", container.Command, want)
+		}
+		return
+	}
+	t.Fatalf("previous dependency version is not running after rollback: %#v", listManagedContainers(t, rt))
 }
 
 func TestRollbackAppliesLastGoodState(t *testing.T) {

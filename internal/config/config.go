@@ -42,7 +42,7 @@ type BuilderConfig struct {
 type ServerConfig struct {
 	Hosts       []string          `yaml:"hosts"`
 	Aliases     []string          `yaml:"aliases"`
-	Command     string            `yaml:"command"`
+	Command     Command           `yaml:"command"`
 	AppPort     int               `yaml:"app_port"`
 	Replicas    int               `yaml:"replicas"`
 	Volumes     []string          `yaml:"volumes"`
@@ -86,6 +86,7 @@ type NetworkingConfig struct {
 
 type DependencyConfig struct {
 	Image        string                   `yaml:"image"`
+	Command      Command                  `yaml:"command"`
 	Hosts        []string                 `yaml:"hosts"`
 	Aliases      []string                 `yaml:"aliases"`
 	InternalPort int                      `yaml:"internal_port"`
@@ -93,6 +94,24 @@ type DependencyConfig struct {
 	Volumes      []string                 `yaml:"volumes"`
 	Restart      RestartConfig            `yaml:"restart"`
 	Env          EnvConfig                `yaml:"env"`
+}
+
+type Command []string
+
+func (c *Command) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.SequenceNode {
+		return fmt.Errorf("command must be a list of strings")
+	}
+
+	command := make(Command, 0, len(value.Content))
+	for _, argument := range value.Content {
+		if argument.Kind != yaml.ScalarNode || argument.Tag != "!!str" {
+			return fmt.Errorf("command arguments must be strings")
+		}
+		command = append(command, argument.Value)
+	}
+	*c = command
+	return nil
 }
 
 type DependencyPublishConfig struct {

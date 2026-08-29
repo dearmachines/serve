@@ -161,7 +161,7 @@ services:
         hosts:
           - deploy@app-1.example.com
           - deploy@app-2.example.com
-        command: ./api
+        command: [./api]
         app_port: 3000
         replicas: 2
     dependencies:
@@ -183,7 +183,7 @@ services:
       jobs:
         hosts:
           - deploy@worker.example.com
-        command: ./worker
+        command: [./worker]
 ```
 
 `destination`, `networking`, and `retain_containers` are global in this format and cannot be overridden inside a service. Service-specific images, roles, environment, dependencies, and proxy settings remain nested under the service.
@@ -201,6 +201,37 @@ Serve validates and plans all selected services before contacting a host. Applie
 
 `dependencies` is the canonical name for application-owned supporting containers. The legacy `accessories` field is accepted for compatibility, but configuring both fields is an error. Dependencies retain the existing application-coupled deployment, rollback, and retention lifecycle.
 
+## Container commands
+
+Server roles and dependencies configure commands as exact argument lists:
+
+```yaml
+dependencies:
+  redis:
+    image: redis:8-alpine
+    command: [redis-server, --save, "", --appendonly, "no"]
+```
+
+Serve passes these arguments to Docker without shell parsing and preserves the image entrypoint. Omit `command`, or use `command: []`, to retain the image's default command. Scalar command strings are invalid.
+
+Use an explicit shell argument list when the command needs operators or environment expansion:
+
+```yaml
+dependencies:
+  catalog-postgres:
+    image: postgres:18-alpine
+    command:
+      - /bin/sh
+      - -c
+      - |
+        export POSTGRES_PASSWORD="$CATALOG_POSTGRES_PASSWORD"
+        exec docker-entrypoint.sh postgres
+    env:
+      secret: [CATALOG_POSTGRES_PASSWORD]
+```
+
+Commands are non-secret desired-state configuration and are visible in Docker metadata. Serve does not interpolate them, so reference secret environment variables by name and never include plaintext secret values in `command`.
+
 ## Local smoke test
 
 This uses `busybox` so you can verify the local deploy path without building an app image.
@@ -215,7 +246,7 @@ servers:
   web:
     hosts:
       - localhost
-    command: sleep 3600
+    command: [sleep, "3600"]
     replicas: 1
 
 networking:

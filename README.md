@@ -67,7 +67,7 @@ servers:
   web:
     hosts:
       - deploy@example.com
-    command: ./server
+    command: [./server]
     app_port: 3000
     replicas: 2
     healthcheck:
@@ -151,7 +151,7 @@ services:
       web:
         hosts:
           - deploy@app.example.com
-        command: ./api
+        command: [./api]
         app_port: 3000
     proxy:
       app_role: web
@@ -165,7 +165,7 @@ services:
       jobs:
         hosts:
           - deploy@worker.example.com
-        command: ./worker
+        command: [./worker]
 ```
 
 `serve deploy` deploys every service in name order. Pass `--service api` to deploy one service. Existing single-service configuration remains supported. Serve validates and plans every selected service before contacting a host, then applies them in deterministic service and host order. Each host apply is transactional, but the whole file is not: a later failure does not roll back services or hosts already deployed.
@@ -263,12 +263,12 @@ servers:
   web:
     hosts:
       - deploy@app.example.com
-    command: ./billing-server
+    command: [./billing-server]
     app_port: 3000
   worker:
     hosts:
       - deploy@app.example.com
-    command: ./billing-worker
+    command: [./billing-worker]
 
 env:
   plain:
@@ -327,6 +327,47 @@ dependencies:
 
 Each dependency receives only its own nested environment. The former `accessories:` field is still accepted for compatibility, but new configurations should use `dependencies:`. Configuring both fields is an error.
 
+### Command overrides
+
+Application roles and dependencies accept `command` as an argument list. Serve passes the list directly to Docker as the container command while preserving the image's entrypoint. Omit `command`, or use an empty list, to keep the image's default command. Scalar command strings are not accepted.
+
+Use an argument list for ordinary runtime flags:
+
+```yaml
+dependencies:
+  redis:
+    image: redis:8-alpine
+    command:
+      - redis-server
+      - --bind
+      - 0.0.0.0
+      - --protected-mode
+      - "no"
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+```
+
+Docker does not interpret shell operators or expand environment variables in an argument list. Invoke a shell explicitly when an adapter needs those features:
+
+```yaml
+dependencies:
+  catalog-postgres:
+    image: postgres:18-alpine
+    command:
+      - /bin/sh
+      - -c
+      - |
+        export POSTGRES_PASSWORD="$CATALOG_POSTGRES_PASSWORD"
+        exec docker-entrypoint.sh postgres
+    env:
+      secret:
+        - CATALOG_POSTGRES_PASSWORD
+```
+
+Commands are ordinary non-secret configuration stored in Serve's desired state and Docker metadata. Serve does not interpolate command arguments. Refer to secrets by environment-variable name and let the explicitly configured process expand them inside the container; never put plaintext secret values in `command`.
+
 ### Create and edit secrets
 
 Configure SOPS and its decryption credentials on the deployment machine and every host, then open the encrypted file through Serve:
@@ -361,7 +402,7 @@ servers:
   web:
     hosts:
       - deploy@app.example.com
-    command: ./billing-server
+    command: [./billing-server]
     app_port: 3000
     replicas: 2
     healthcheck:
