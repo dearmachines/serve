@@ -2,6 +2,7 @@ package kamalproxy_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -396,6 +397,60 @@ func TestHealingRedeployKeepsRouteOptions(t *testing.T) {
 	}
 	if strings.Contains(last, "my-app-web-production-abc123-r1:3000") {
 		t.Fatalf("removed replica still routed: %s", last)
+	}
+}
+
+func TestEmptyTargetsAreIdempotentWhenActualProxyServiceIsAbsent(t *testing.T) {
+	rt := fakeruntime.NewRuntime()
+	output := "Error: service not found\n"
+	rt.SetExecResult("serve-proxy", output, &runtime.ExecExitError{Code: 1, Output: output})
+	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+	for i := 0; i < 2; i++ {
+		if err := manager.SetTargets(context.Background(), "my-app", "web", nil, proxy.RouteOptions{}); err != nil {
+			t.Fatalf("ensure absent: %v", err)
+		}
+	}
+	if countExecs(rt, "kamal-proxy remove") != 1 {
+		t.Fatalf("confirmed removal not cached: %v", rt.Operations())
+	}
+}
+
+func TestEmptyTargetsAfterAgentRestartRemoveExistingProxyRoute(t *testing.T) {
+	rt := fakeruntime.NewRuntime()
+	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+	if err := manager.AddTarget(context.Background(), webTarget()); err != nil {
+		t.Fatal(err)
+	}
+	rt.ClearOperations()
+	fresh := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+	if err := fresh.SetTargets(context.Background(), "my-app", "web", nil, proxy.RouteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if countExecs(rt, "kamal-proxy remove") != 1 {
+		t.Fatalf("fresh manager trusted its empty cache over the live proxy: %v", rt.Operations())
+	}
+}
+
+func TestEmptyTargetsPreserveGenuineProxyFailures(t *testing.T) {
+	for _, err := range []error{
+		errors.New("Docker transport disconnected"),
+		&runtime.ExecExitError{Code: 1, Output: "Error: permission denied"},
+		&runtime.ExecExitError{Code: 2, Output: "Error: service not found"},
+	} {
+		t.Run(err.Error(), func(t *testing.T) {
+			rt := fakeruntime.NewRuntime()
+			// Output alone must not override a Docker transport error.
+			rt.SetExecResult("serve-proxy", "Error: service not found\n", err)
+			manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+			for i := 0; i < 2; i++ {
+				if got := manager.SetTargets(context.Background(), "my-app", "web", nil, proxy.RouteOptions{}); !errors.Is(got, err) {
+					t.Fatalf("proxy failure swallowed: %v", got)
+				}
+			}
+			if countExecs(rt, "kamal-proxy remove") != 2 {
+				t.Fatal("failed removal cached as successful")
+			}
+		})
 	}
 }
 

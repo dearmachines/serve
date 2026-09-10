@@ -397,7 +397,11 @@ Host provisioning is intentionally out of scope. Docker, the Serve binary, the s
 - All local operational commands use `/run/serve/agent.sock` by default and accept `--socket`. Remote commands retain SSH + socket transport.
 - State directories and Docker/registry/SOPS credentials belong to the agent. Reject `--state-dir` on deploy, agent apply, and rollback.
 - Hold service/destination operation locks through apply, persistence, and healing-target publication. Reconciliation must reload desired state under the lock.
-- Remove/prune exclude concurrent lifecycle operations. Removal persists intent so workloads are not healed back; prune preserves desired containers awaiting healing. Both preserve the shared proxy and volumes.
+- Remove/prune exclude concurrent lifecycle operations with a host-wide maintenance lock. Removal persists intent so workloads are not healed back; prune preserves desired containers awaiting healing. Both preserve the shared proxy and volumes.
+- Partial removal saves the reduced rollback baseline before desired state and repairs stale baselines on retry, even if desired already omits the role. State-file writes are individually atomic, not a multi-file transaction.
+- Empty proxy targets must ensure absence in the real proxy, including after agent restart. Never equate an empty manager cache with absent routes. Treat only the pinned proxy's confirmed service-not-found process exit as success; retain genuine Docker/proxy errors. Clearing persisted routes may require starting the proxy.
+- Rollback publishes lifecycle events immediately through the agent event sink and returns a structured completed/failed outcome. The CLI preserves the returned transcript on failure; HTTP 200 alone must not imply success.
+- Remove/prune refresh failures remain nonzero exits but report completed deletion counts. Logs/exec distinguish missing/ambiguous selections from Docker failures.
 - Local deploy's `--host` is the manifest host identity (default `localhost`), not an SSH destination to contact.
 - Docker is the runtime, not the orchestrator.
 - Systemd should only start the Serve agent, not individual app containers.

@@ -70,6 +70,7 @@ func TestJSONSinkLevels(t *testing.T) {
 		"container_exited":      "warn",
 		"container_restarted":   "warn",
 		"restart_loop_detected": "error",
+		"rollback_failed":       "error",
 		"container_started":     "info",
 	}
 	for event, wantLevel := range cases {

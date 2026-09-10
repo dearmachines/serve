@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"time"
 
@@ -41,6 +43,15 @@ type RollbackRequest struct {
 	Destination string `json:"destination"`
 }
 
+// RollbackResponse distinguishes a completed rollback from an accepted request.
+// Lifecycle events are emitted immediately on the agent; Output preserves the
+// CLI's event transcript even when the operation fails.
+type RollbackResponse struct {
+	Status string `json:"status"`
+	Output string `json:"output"`
+	Error  string `json:"error,omitempty"`
+}
+
 func decodeRequest(w http.ResponseWriter, r *http.Request, value any) bool {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -66,6 +77,22 @@ func (d *Daemon) managedContainers(ctx context.Context, labels map[string]string
 	sort.Slice(containers, func(i, j int) bool { return containers[i].Name < containers[j].Name })
 	return containers, err
 }
+
+var (
+	errContainerNotFound  = errors.New("container not found")
+	errAmbiguousSelection = errors.New("multiple matching containers found; pass --container")
+)
+
+func selectionErrorStatus(err error) int {
+	if errors.Is(err, errContainerNotFound) {
+		return http.StatusNotFound
+	}
+	if errors.Is(err, errAmbiguousSelection) {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
+}
+
 func (d *Daemon) selectContainer(ctx context.Context, name string, labels map[string]string) (runtime.ContainerState, error) {
 	containers, err := d.managedContainers(ctx, labels)
 	if err != nil {
@@ -77,13 +104,13 @@ func (d *Daemon) selectContainer(ctx context.Context, name string, labels map[st
 				return c, nil
 			}
 		}
-		return runtime.ContainerState{}, fmt.Errorf("container %s not found", name)
+		return runtime.ContainerState{}, fmt.Errorf("%w: %s", errContainerNotFound, name)
 	}
 	if len(containers) == 0 {
-		return runtime.ContainerState{}, fmt.Errorf("no matching Serve-managed containers found")
+		return runtime.ContainerState{}, fmt.Errorf("%w: no matching Serve-managed containers", errContainerNotFound)
 	}
 	if len(containers) > 1 {
-		return runtime.ContainerState{}, fmt.Errorf("multiple matching containers found; pass --container")
+		return runtime.ContainerState{}, errAmbiguousSelection
 	}
 	return containers[0], nil
 }
@@ -100,7 +127,7 @@ func (d *Daemon) handleExec(w http.ResponseWriter, r *http.Request) {
 	defer d.maintenance.RUnlock()
 	c, err := d.selectContainer(r.Context(), request.Container, nil)
 	if err != nil {
-		http.Error(w, err.Error(), 404)
+		http.Error(w, err.Error(), selectionErrorStatus(err))
 		return
 	}
 	lock := d.operationLock(stateKey(c.Labels["serve.service"], c.Labels["serve.destination"]))
@@ -108,7 +135,7 @@ func (d *Daemon) handleExec(w http.ResponseWriter, r *http.Request) {
 	defer lock.Unlock()
 	c, err = d.selectContainer(r.Context(), request.Container, nil)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), selectionErrorStatus(err))
 		return
 	}
 	output, err := d.runtime.ExecContainer(r.Context(), c.ID, request.Command)
@@ -168,7 +195,7 @@ func (d *Daemon) handleRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	states, err := d.store.ListDesired()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		maintenanceRefreshError(w, "Removed", removed, err)
 		return
 	}
 	for _, desired := range states {
@@ -183,7 +210,7 @@ func (d *Daemon) handleRemove(w http.ResponseWriter, r *http.Request) {
 			err = d.store.SaveActual(actual)
 		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			maintenanceRefreshError(w, "Removed", removed, err)
 			return
 		}
 	}
@@ -217,7 +244,28 @@ func (d *Daemon) removeIntent(ctx context.Context, request RemoveRequest) error 
 			}
 		}
 		if len(remaining) == len(desired.Containers) {
-			continue
+			// Older agents could publish reduced desired state before failing to
+			// update last-good. Repair that pair on retry without resetting an
+			// unrelated rollback baseline for a genuine no-op removal.
+			baseline, err := d.store.LoadLastGood(desired.Service, desired.Destination)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("load removal rollback baseline: %w", err)
+			}
+			stale := false
+			for _, container := range baseline.Containers {
+				if request.Role == "" || container.Role == request.Role {
+					stale = true
+					if container.Proxy {
+						routes[container.Role] = true
+					}
+				}
+			}
+			if !stale {
+				continue
+			}
 		}
 		for role := range routes {
 			if err := d.proxy.SetTargets(ctx, desired.Service, role, nil, proxy.RouteOptions{}); err != nil {
@@ -233,14 +281,15 @@ func (d *Daemon) removeIntent(ctx context.Context, request RemoveRequest) error 
 			delete(d.desired, stateKey(desired.Service, desired.Destination))
 			d.mu.Unlock()
 		} else {
+			// Prepare the rollback baseline first. If either write fails, desired
+			// still contains the role and a retry repeats the baseline update.
+			if err := d.store.SaveLastGood(desired); err != nil {
+				return fmt.Errorf("save removal rollback baseline: %w", err)
+			}
 			if err := d.store.SaveDesired(desired); err != nil {
-				return err
+				return fmt.Errorf("save removal desired state: %w", err)
 			}
 			d.setDesired(desired)
-			// Removal is a new baseline: rollback must not resurrect the removed role.
-			if err := d.store.SaveLastGood(desired); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
@@ -290,12 +339,16 @@ func (d *Daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 			err = d.store.SaveActual(actual)
 		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			maintenanceRefreshError(w, "Pruned", count, err)
 			return
 		}
 	}
 	fmt.Fprintf(w, "Pruned %d container(s)\n", count)
 }
+func maintenanceRefreshError(w http.ResponseWriter, verb string, count int, err error) {
+	http.Error(w, fmt.Sprintf("%s %d container(s); failed to refresh actual state: %v. Retry the operation to finish the refresh.", verb, count, err), http.StatusInternalServerError)
+}
+
 func (d *Daemon) handleRollback(w http.ResponseWriter, r *http.Request) {
 	var request RollbackRequest
 	if !decodeRequest(w, r, &request) {
@@ -316,21 +369,31 @@ func (d *Daemon) handleRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var output bytes.Buffer
+	result := RollbackResponse{Status: "failed"}
+	defer func() { result.Output = output.String(); writeJSON(w, result) }()
 	sink := events.NewJSONSink(&output)
-	event := healing.LifecycleEvent{Name: "rollback_started", Service: desired.Service, Destination: desired.Destination, Version: desired.Version, Actor: "serve"}
-	if err := sink.Emit(r.Context(), event); err != nil {
-		http.Error(w, err.Error(), 500)
+	emit := func(name string) error {
+		event := healing.LifecycleEvent{Name: name, Service: desired.Service, Destination: desired.Destination, Version: desired.Version, Actor: "serve"}
+		if err := sink.Emit(r.Context(), event); err != nil {
+			return err
+		}
+		return d.eventSink.Emit(r.Context(), event)
+	}
+	if err := emit("rollback_started"); err != nil {
+		result.Error = fmt.Sprintf("record rollback_started: %v", err)
 		return
 	}
 	if err := d.commitDesired(r.Context(), desired); err != nil {
-		http.Error(w, err.Error(), 500)
+		result.Error = err.Error()
+		if logErr := emit("rollback_failed"); logErr != nil {
+			result.Error += fmt.Sprintf("; record rollback_failed: %v", logErr)
+		}
 		return
 	}
-	event.Name = "rollback_completed"
-	if err := sink.Emit(r.Context(), event); err != nil {
-		http.Error(w, err.Error(), 500)
+	if err := emit("rollback_completed"); err != nil {
+		result.Error = fmt.Sprintf("rollback applied; record rollback_completed: %v", err)
 		return
 	}
+	result.Status = "completed"
 	fmt.Fprintf(&output, "Rolled back %s %s to %s\n", desired.Service, desired.Destination, desired.Version)
-	w.Write(output.Bytes())
 }

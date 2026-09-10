@@ -455,7 +455,29 @@ func (c *Command) runRollback(ctx context.Context, args []string, stdout io.Writ
 	if err != nil {
 		return err
 	}
-	return c.socketOutput(ctx, http.MethodPost, "/v1/rollback", daemon.RollbackRequest{Service: options.service, Destination: options.destination}, stdout)
+	payload, err := json.Marshal(daemon.RollbackRequest{Service: options.service, Destination: options.destination})
+	if err != nil {
+		return err
+	}
+	response, err := agentSocketRequestWithBody(ctx, c.socketPath, http.MethodPost, "/v1/rollback", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	var result daemon.RollbackResponse
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return fmt.Errorf("serve rollback: decode outcome: %w", err)
+	}
+	if _, err := io.WriteString(stdout, result.Output); err != nil {
+		return err
+	}
+	if result.Error != "" {
+		return fmt.Errorf("serve rollback: %s", result.Error)
+	}
+	if result.Status != "completed" {
+		return fmt.Errorf("serve rollback: agent did not report a completed rollback (status %q)", result.Status)
+	}
+	return nil
 }
 
 func (c *Command) runSecrets(ctx context.Context, args []string, stdout io.Writer) error {

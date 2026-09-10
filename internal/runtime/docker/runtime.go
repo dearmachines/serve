@@ -241,7 +241,7 @@ func (r *Runtime) ExecContainer(ctx context.Context, id runtime.ContainerID, cmd
 		return output.String(), err
 	}
 	if inspect.ExitCode != 0 {
-		return output.String(), fmt.Errorf("exec %q exited with code %d: %s", strings.Join(cmd, " "), inspect.ExitCode, strings.TrimSpace(output.String()))
+		return output.String(), &runtime.ExecExitError{Command: append([]string(nil), cmd...), Code: inspect.ExitCode, Output: output.String()}
 	}
 	return output.String(), nil
 }

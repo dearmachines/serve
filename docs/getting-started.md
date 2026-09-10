@@ -166,9 +166,19 @@ Notes:
 
 `serve rollback --service SERVICE --destination DEST` asks the agent to load and health-check its last-good state. Deployment, rollback, healing, and reconciliation share service/destination operation locks; state publication happens before releasing the lock. Reconciliation reloads state under the lock, so an older snapshot cannot undo a successful deployment.
 
-`serve remove --force` removes matching workloads from the agent's desired state as well as Docker, so healing, reconciliation, and agent restarts do not recreate them. `--role` keeps other roles running. Full service removal clears its deployment/rollback state; partial removal establishes a new rollback baseline without the removed roles. Removed public roles are unrouted. If Docker cleanup fails, removal intent remains persisted: retry removal to finish cleanup. A later explicit deploy can recreate workloads from the manifest.
+`serve remove --force` removes matching workloads from the agent's desired state as well as Docker, so healing, reconciliation, and agent restarts do not recreate them. `--role` keeps other roles running. Full service removal clears its deployment/rollback state; partial removal saves a rollback baseline without the removed roles before publishing reduced desired state. Retrying removal also repairs a stale baseline left by an older agent. These are ordered, individually atomic file writes, not a crash-atomic transaction across state files.
+
+Removed public roles are unrouted against the actual proxy, not just the agent's in-memory cache. An already-absent proxy service is success; other proxy/Docker errors remain failures. The agent may start or adopt the proxy to clear routing state restored from its persistent volume, including after an agent restart.
+
+If container cleanup fails after removal intent is persisted, retry removal to finish cleanup. A later explicit deploy can recreate workloads from the manifest.
 
 `serve prune --force` deletes stopped, non-desired managed containers. It preserves running containers and desired containers awaiting healing. Both remove and prune preserve the shared proxy and volume data, and wait for in-flight lifecycle operations before selecting containers. Multi-service removal is sequential, not an all-or-nothing transaction.
+
+If remove or prune finishes deleting containers but cannot refresh actual state, the command still exits nonzero and reports how many containers were deleted. Retry the operation to finish refreshing state; a failed refresh does not undo the deletion. The maintenance lock is host-wide, so unrelated lifecycle operations can wait while maintenance is pending or running.
+
+Rollback emits `rollback_started` immediately to the agent's lifecycle log, followed by `rollback_completed` or `rollback_failed`. The CLI receives the event transcript when the operation finishes, including on failure, and exits nonzero for a failed or incomplete outcome. It does not stream live rollback progress. For API callers, a validated rollback attempt returns JSON with `status` (`completed` or `failed`), `output`, and an optional `error`; HTTP 200 alone is not proof of a successful rollback. Validation and last-good lookup errors still use HTTP error responses.
+
+Logs and exec report a missing container as HTTP 404, ambiguous selection as 400, and Docker selection failures as 500.
 
 `serve exec` sends exact argument lists to the agent and preserves output on command failure. It is non-interactive; stdin/TTY attachment is not implemented.
 

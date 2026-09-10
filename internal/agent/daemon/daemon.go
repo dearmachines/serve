@@ -59,6 +59,7 @@ type Daemon struct {
 	engine     *cutover.Engine
 	supervisor *healing.Supervisor
 	proxy      proxy.Manager
+	eventSink  healing.EventSink
 	socketPath string
 	interval   time.Duration
 	errorLog   io.Writer
@@ -136,6 +137,7 @@ func New(cfg Config) *Daemon {
 		engine:         engine,
 		supervisor:     supervisor,
 		proxy:          cfg.ProxyManager,
+		eventSink:      cfg.EventSink,
 		socketPath:     cfg.SocketPath,
 		interval:       cfg.ReconcileInterval,
 		errorLog:       cfg.ErrorLog,
@@ -341,7 +343,7 @@ func (d *Daemon) handleLogs(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	container, err := d.selectContainer(r.Context(), query.Get("container"), map[string]string{"serve.service": query.Get("service"), "serve.destination": query.Get("destination"), "serve.role": query.Get("role")})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), selectionErrorStatus(err))
 		return
 	}
 	logs, err := d.runtime.Logs(r.Context(), container.ID, runtime.LogOptions{})
