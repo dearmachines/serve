@@ -28,23 +28,23 @@ serve --help
 serve -h
 serve version
 serve init [--path serve.yml] [--force]
-serve status [--config serve.yml]
-serve logs [--host HOST] [--container NAME] [--service SERVICE] [--destination DEST] [--role ROLE]
-serve events [--host HOST] [--once]
-serve doctor
-serve remove [--service SERVICE] [--destination DEST] [--role ROLE] --force
-serve prune --force
-serve rollback --service SERVICE --destination DEST [--state-dir .serve/state]
+serve status [--config serve.yml | --socket PATH]
+serve logs [--host HOST | --socket PATH] [--container NAME] [--service SERVICE] [--destination DEST] [--role ROLE]
+serve events [--host HOST | --socket PATH] [--once]
+serve doctor [--socket PATH]
+serve remove [--service SERVICE] [--destination DEST] [--role ROLE] --force [--socket PATH]
+serve prune --force [--socket PATH]
+serve rollback --service SERVICE --destination DEST [--socket PATH]
 serve secrets edit [--file serve.secrets.yml]
-serve agent apply <desired.json> [--state-dir .serve/state] [--socket PATH]
+serve agent apply <desired.json> [--socket PATH]
 serve agent run [--state-dir DIR] [--socket PATH] [--reconcile-interval 10s]
 serve agent reconcile [--socket PATH]
 serve agent status [--json] [--socket PATH]
 serve agent logs --container NAME [--socket PATH]
 serve agent events [--once] [--socket PATH]
 serve deploy [--config serve.yml] [--service SERVICE] [--version VERSION]
-serve deploy --local [--config serve.yml] [--service SERVICE] [--host localhost] [--version dev] [--state-dir .serve/state]
-serve exec [--host HOST] --container NAME -- CMD [ARGS...]
+serve deploy --local [--config serve.yml] [--service SERVICE] [--host localhost] [--version dev] [--socket PATH]
+serve exec [--host HOST | --socket PATH] --container NAME -- CMD [ARGS...]
 ```
 
 `serve setup` is not a product requirement. Do not implement it unless the user explicitly changes the scope.
@@ -133,6 +133,8 @@ Create or update a starter config:
 serve init --path serve.yml
 ```
 
+First run `serve agent run --socket /tmp/serve-dev.sock --state-dir .serve/state` in another terminal. Use a separate Docker environment from production; a different state directory does not isolate workloads.
+
 For a local smoke test, use a pullable image:
 
 ```sh
@@ -154,28 +156,21 @@ networking:
 retain_containers: 5
 YAML
 
-docker pull busybox:1.36
-serve deploy --local --config serve.yml --host localhost --version dev --state-dir .serve/state
-serve status
+serve deploy --local --config serve.yml --host localhost --version dev --socket /tmp/serve-dev.sock
+serve status --socket /tmp/serve-dev.sock
 ```
 
 Clean up:
 
 ```sh
-docker rm -f demo-web-local-dev-r1
+serve remove --service demo --destination local --force --socket /tmp/serve-dev.sock
 ```
 
 ### Container commands
 
 `servers.<role>.command` and `dependencies.<name>.command` are argument lists passed directly to Docker as `Cmd`; scalar strings are invalid. Omitted or empty commands preserve the image default, and image entrypoints remain in effect. Use an explicit `[/bin/sh, -c, SCRIPT]` argument list when shell operators or runtime environment expansion are required. Commands are non-secret desired-state configuration: Serve must not interpolate them or persist plaintext secret values in them.
 
-Apply a desired state JSON directly:
-
-```sh
-serve agent apply ./desired.json --state-dir .serve/state
-```
-
-Submit desired state to a running agent:
+Submit desired state to a running agent (there is no direct-runtime apply mode):
 
 ```sh
 serve agent apply ./desired.json --socket /run/serve/agent.sock
@@ -397,8 +392,13 @@ Host provisioning is intentionally out of scope. Docker, the Serve binary, the s
 
 ## Architecture reminders
 
-- The CLI is the deploy controller.
-- The agent is the host orchestrator.
+- The CLI plans deployments and communicates through the agent API; it must never call Docker directly.
+- The agent is the sole host orchestrator and Docker owner. Only `serve agent run` starts it; no client command starts an agent or falls back to Docker.
+- All local operational commands use `/run/serve/agent.sock` by default and accept `--socket`. Remote commands retain SSH + socket transport.
+- State directories and Docker/registry/SOPS credentials belong to the agent. Reject `--state-dir` on deploy, agent apply, and rollback.
+- Hold service/destination operation locks through apply, persistence, and healing-target publication. Reconciliation must reload desired state under the lock.
+- Remove/prune exclude concurrent lifecycle operations. Removal persists intent so workloads are not healed back; prune preserves desired containers awaiting healing. Both preserve the shared proxy and volumes.
+- Local deploy's `--host` is the manifest host identity (default `localhost`), not an SSH destination to contact.
 - Docker is the runtime, not the orchestrator.
 - Systemd should only start the Serve agent, not individual app containers.
 - App/dependency containers are managed through the agent/reconciler.
@@ -410,7 +410,7 @@ Host provisioning is intentionally out of scope. Docker, the Serve binary, the s
 
 ```txt
 cmd/serve                         CLI entrypoint
-internal/cli                      CLI command routing and local command implementations
+internal/cli                      planning, output formatting, SSH and agent API clients
 internal/config                   serve.yml parser/validator
 internal/planner                  desired-state planner
 internal/runtime                  runtime and network-alias interfaces

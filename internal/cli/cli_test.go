@@ -137,7 +137,7 @@ func TestInitRefusesToOverwriteUnlessForced(t *testing.T) {
 
 func TestStatusReportsNoManagedContainers(t *testing.T) {
 	rt := fake.NewRuntime()
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, "")
 
 	var stdout bytes.Buffer
 	exitCode := cmd.Run(context.Background(), []string{"status"}, &stdout, io.Discard)
@@ -156,7 +156,7 @@ func TestStatusListsManagedContainers(t *testing.T) {
 	if err := rt.StartContainer(context.Background(), id); err != nil {
 		t.Fatalf("start container: %v", err)
 	}
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, "")
 
 	var stdout bytes.Buffer
 	exitCode := cmd.Run(context.Background(), []string{"status"}, &stdout, io.Discard)
@@ -176,7 +176,7 @@ func TestLogsStreamsSelectedContainerLogs(t *testing.T) {
 	rt := fake.NewRuntime()
 	id := createManagedContainer(t, rt, "my-app-web-production-abc123-r1", "web")
 	rt.SetLogs(id, "hello from container\n")
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, "")
 
 	var stdout bytes.Buffer
 	exitCode := cmd.Run(context.Background(), []string{"logs", "--container", "my-app-web-production-abc123-r1"}, &stdout, io.Discard)
@@ -192,7 +192,7 @@ func TestLogsStreamsSelectedContainerLogs(t *testing.T) {
 func TestEventsPrintsOneRuntimeEvent(t *testing.T) {
 	rt := fake.NewRuntime()
 	id := createManagedContainer(t, rt, "my-app-web-production-abc123-r1", "web")
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, "")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	var stdout bytes.Buffer
@@ -202,7 +202,7 @@ func TestEventsPrintsOneRuntimeEvent(t *testing.T) {
 	go func() {
 		done <- cmd.Run(ctx, []string{"events", "--once"}, &stdout, &stderr)
 	}()
-	rt.WaitForSubscribers(t, 1)
+	rt.WaitForSubscribers(t, 2)
 	rt.Die(id, 137, true)
 
 	select {
@@ -225,7 +225,7 @@ func TestRemoveDeletesMatchingManagedContainers(t *testing.T) {
 	rt := fake.NewRuntime()
 	createManagedContainer(t, rt, "my-app-web-production-abc123-r1", "web")
 	createManagedContainer(t, rt, "other-worker-production-abc123-r1", "worker")
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, "")
 
 	var stdout bytes.Buffer
 	exitCode := cmd.Run(context.Background(), []string{"remove", "--service", "my-app", "--destination", "production", "--force"}, &stdout, io.Discard)
@@ -247,7 +247,7 @@ func TestRemoveDeletesMatchingManagedContainers(t *testing.T) {
 
 func TestDoctorReportsDockerAndNetworkChecks(t *testing.T) {
 	rt := fake.NewRuntime()
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, "")
 
 	var stdout bytes.Buffer
 	exitCode := cmd.Run(context.Background(), []string{"doctor"}, &stdout, io.Discard)
@@ -285,10 +285,10 @@ func TestAgentApplyLoadsDesiredStateSavesItAndReconciles(t *testing.T) {
 	rt := fake.NewRuntime()
 	stateDir := t.TempDir()
 	desiredPath := writeDesiredState(t, stateDir, desiredState("abc123"))
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, stateDir)
 
 	var stdout bytes.Buffer
-	exitCode := cmd.Run(context.Background(), []string{"agent", "apply", desiredPath, "--state-dir", stateDir}, &stdout, io.Discard)
+	exitCode := cmd.Run(context.Background(), []string{"agent", "apply", desiredPath}, &stdout, io.Discard)
 
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
@@ -370,7 +370,7 @@ func TestAgentApplyRejectsEmptyDesiredStateBeforeRuntimeChanges(t *testing.T) {
 	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
 
 	var stderr bytes.Buffer
-	exitCode := cmd.Run(context.Background(), []string{"agent", "apply", desiredPath, "--state-dir", stateDir}, io.Discard, &stderr)
+	exitCode := cmd.Run(context.Background(), []string{"agent", "apply", desiredPath}, io.Discard, &stderr)
 
 	if exitCode != 1 {
 		t.Fatalf("expected exit code 1, got %d", exitCode)
@@ -391,7 +391,7 @@ func TestAgentApplyRejectsUnsafeIdentityBeforeRuntimeChanges(t *testing.T) {
 	desiredPath := writeDesiredState(t, stateDir, desired)
 	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
 
-	exitCode := cmd.Run(context.Background(), []string{"agent", "apply", desiredPath, "--state-dir", stateDir}, io.Discard, io.Discard)
+	exitCode := cmd.Run(context.Background(), []string{"agent", "apply", desiredPath}, io.Discard, io.Discard)
 
 	if exitCode != 1 {
 		t.Fatalf("expected exit code 1, got %d", exitCode)
@@ -456,10 +456,10 @@ servers:
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, dir)
 
 	var stdout bytes.Buffer
-	exitCode := cmd.Run(context.Background(), []string{"deploy", "--local", "--config", configPath, "--version", "abc123", "--state-dir", dir}, &stdout, io.Discard)
+	exitCode := cmd.Run(context.Background(), []string{"deploy", "--local", "--config", configPath, "--version", "abc123"}, &stdout, io.Discard)
 
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
@@ -519,9 +519,9 @@ services:
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, dir)
 
-	exitCode := cmd.Run(context.Background(), []string{"deploy", "--local", "--config", configPath, "--version", "dev", "--state-dir", dir}, io.Discard, io.Discard)
+	exitCode := cmd.Run(context.Background(), []string{"deploy", "--local", "--config", configPath, "--version", "dev"}, io.Discard, io.Discard)
 
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
@@ -559,9 +559,9 @@ services:
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, dir)
 
-	exitCode := cmd.Run(context.Background(), []string{"deploy", "--local", "--config", configPath, "--version", "dev", "--state-dir", dir}, io.Discard, io.Discard)
+	exitCode := cmd.Run(context.Background(), []string{"deploy", "--local", "--config", configPath, "--version", "dev"}, io.Discard, io.Discard)
 
 	if exitCode != 1 {
 		t.Fatalf("expected exit code 1, got %d", exitCode)
@@ -1167,7 +1167,7 @@ func TestExecRunsCommandInLocalContainer(t *testing.T) {
 		t.Fatalf("start container: %v", err)
 	}
 	rt.SetExecResult("my-app-web-production-abc123-r1", "total 0\n", nil)
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, "")
 
 	var stdout bytes.Buffer
 	exitCode := cmd.Run(context.Background(), []string{"exec", "--container", "my-app-web-production-abc123-r1", "--", "ls", "-la"}, &stdout, io.Discard)
@@ -1333,11 +1333,11 @@ servers:
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, stateDir)
 	for _, version := range []string{"v1", "v2"} {
 		exitCode := cmd.Run(context.Background(), []string{
 			"deploy", "--local", "--config", configPath, "--host", "localhost",
-			"--version", version, "--state-dir", stateDir,
+			"--version", version,
 		}, io.Discard, io.Discard)
 		if exitCode != 0 {
 			t.Fatalf("deploy %s exit code = %d", version, exitCode)
@@ -1353,7 +1353,7 @@ servers:
 	}
 
 	exitCode := cmd.Run(context.Background(), []string{
-		"rollback", "--service", "my-app", "--destination", "production", "--state-dir", stateDir,
+		"rollback", "--service", "my-app", "--destination", "production",
 	}, io.Discard, io.Discard)
 	if exitCode != 0 {
 		t.Fatalf("rollback exit code = %d", exitCode)
@@ -1390,7 +1390,7 @@ dependencies:
 			t.Fatalf("write config: %v", err)
 		}
 	}
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, stateDir)
 	for _, deploy := range []struct {
 		version string
 		command string
@@ -1401,7 +1401,7 @@ dependencies:
 		writeDependencyConfig(deploy.command)
 		exitCode := cmd.Run(context.Background(), []string{
 			"deploy", "--local", "--config", configPath, "--host", "localhost",
-			"--version", deploy.version, "--state-dir", stateDir,
+			"--version", deploy.version,
 		}, io.Discard, io.Discard)
 		if exitCode != 0 {
 			t.Fatalf("deploy %s exit code = %d", deploy.version, exitCode)
@@ -1409,7 +1409,7 @@ dependencies:
 	}
 
 	exitCode := cmd.Run(context.Background(), []string{
-		"rollback", "--service", "my-app", "--destination", "production", "--state-dir", stateDir,
+		"rollback", "--service", "my-app", "--destination", "production",
 	}, io.Discard, io.Discard)
 	if exitCode != 0 {
 		t.Fatalf("rollback exit code = %d", exitCode)
@@ -1435,10 +1435,10 @@ func TestRollbackAppliesLastGoodState(t *testing.T) {
 	if err := agentstate.NewStore(stateDir).SaveLastGood(lastGood); err != nil {
 		t.Fatalf("save last-good state: %v", err)
 	}
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, stateDir)
 
 	var stdout bytes.Buffer
-	exitCode := cmd.Run(context.Background(), []string{"rollback", "--service", "my-app", "--destination", "production", "--state-dir", stateDir}, &stdout, io.Discard)
+	exitCode := cmd.Run(context.Background(), []string{"rollback", "--service", "my-app", "--destination", "production"}, &stdout, io.Discard)
 
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
@@ -1458,10 +1458,10 @@ func TestRollbackLogsStartedAndCompletedEvents(t *testing.T) {
 	if err := agentstate.NewStore(stateDir).SaveLastGood(desiredState("abc123")); err != nil {
 		t.Fatalf("save last-good state: %v", err)
 	}
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, stateDir)
 
 	var stdout bytes.Buffer
-	exitCode := cmd.Run(context.Background(), []string{"rollback", "--service", "my-app", "--destination", "production", "--state-dir", stateDir}, &stdout, io.Discard)
+	exitCode := cmd.Run(context.Background(), []string{"rollback", "--service", "my-app", "--destination", "production"}, &stdout, io.Discard)
 
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
@@ -1494,7 +1494,7 @@ func TestPruneRemovesStoppedManagedContainers(t *testing.T) {
 	if err := rt.StartContainer(context.Background(), runningID); err != nil {
 		t.Fatalf("start container: %v", err)
 	}
-	cmd := cli.New("v1.2.3-test", cli.WithRuntime(rt))
+	cmd := socketCommand(t, rt, "")
 
 	var stdout bytes.Buffer
 	exitCode := cmd.Run(context.Background(), []string{"prune", "--force"}, &stdout, io.Discard)

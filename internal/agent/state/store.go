@@ -39,6 +39,20 @@ func (s *Store) Dir() string {
 	return s.dir
 }
 
+// Forget removes deployment state without touching volume data. Delete desired
+// last so a cleanup failure cannot leave the daemon healing a forgotten service.
+func (s *Store) Forget(service, destination string) error {
+	if err := ValidateIdentity(service, destination); err != nil {
+		return err
+	}
+	for _, kind := range []string{"last-good", "actual", "desired"} {
+		if err := os.Remove(statePath(s.dir, service, destination, kind)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) SaveDesired(desired planner.DesiredState) error {
 	if err := ValidateIdentity(desired.Service, desired.Destination); err != nil {
 		return err

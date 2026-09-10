@@ -103,6 +103,21 @@ If `image` has no tag, Serve appends the value passed to `--version`. The exampl
 
 Serve starts the new containers, waits for their health checks, switches proxy traffic, and then retires the previous containers according to `retain_containers`.
 
+## Local operation uses the agent too
+
+The CLI never calls Docker directly. Deployment, status, logs, events, exec, doctor, rollback, remove, and prune all use the host agent API. Remote commands reach it through SSH; local commands use `/run/serve/agent.sock` (override with `--socket PATH`). If the agent is unavailable, commands fail—there is no standalone fallback.
+
+On a prepared host:
+
+```sh
+sudo serve deploy --local --config serve.yml --host deploy@example.com --version v1.2.3
+sudo serve status
+```
+
+Here `--host` selects the exact host identity in the manifest; it does not initiate SSH. It defaults to `localhost`. The agent owns Docker/registry/SOPS credentials and deployment state. `--state-dir` belongs only on `serve agent run`, not deploy, apply, or rollback. Socket access is root-equivalent and may require `sudo`.
+
+For development, start `serve agent run --socket /tmp/serve-dev.sock --state-dir .serve/state`, then use `--socket /tmp/serve-dev.sock` on local commands. Run only one agent for a given set of Docker workloads. See [local migration and command semantics](docs/getting-started.md#agent-ownership-and-local-operation).
+
 ## Operate the application
 
 Show containers on every host in `serve.yml`:
@@ -129,6 +144,8 @@ Stream Docker events from a host:
 ```sh
 serve events --host deploy@example.com
 ```
+
+`serve rollback --service SERVICE --destination DEST` uses the agent's last-good state. `serve remove --force` also removes matching desired workloads, preventing automatic recreation; `serve prune --force` removes stopped containers that are no longer desired. Both preserve the shared proxy and volume data. These commands target the local agent; run them on the host or over SSH.
 
 Run `serve --help` for the complete command list.
 

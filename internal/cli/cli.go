@@ -19,30 +19,20 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/uptimenine/serve/internal/agent/cutover"
 	"github.com/uptimenine/serve/internal/agent/daemon"
-	"github.com/uptimenine/serve/internal/agent/events"
-	"github.com/uptimenine/serve/internal/agent/healing"
-	"github.com/uptimenine/serve/internal/agent/health"
-	"github.com/uptimenine/serve/internal/agent/proxy/kamalproxy"
-	"github.com/uptimenine/serve/internal/agent/reconciler"
-	"github.com/uptimenine/serve/internal/agent/secrets"
-	"github.com/uptimenine/serve/internal/agent/secrets/sops"
 	agentstate "github.com/uptimenine/serve/internal/agent/state"
 	"github.com/uptimenine/serve/internal/config"
 	"github.com/uptimenine/serve/internal/planner"
 	"github.com/uptimenine/serve/internal/runtime"
-	dockerruntime "github.com/uptimenine/serve/internal/runtime/docker"
 )
-
-// secretEnvFileDir keeps decrypted environment files on the host's tmpfs.
-const secretEnvFileDir = "/run/serve/env"
 
 type Command struct {
 	version        string
-	runtimeFactory func() (runtime.Runtime, error)
+	agentRuntime   runtime.Runtime
 	runner         Runner
 	sshRunner      SSHRunner
+	socketPath     string
+	socketExplicit bool
 }
 
 type Runner interface {
@@ -59,12 +49,10 @@ type Option func(*Command)
 
 func New(version string, opts ...Option) *Command {
 	cmd := &Command{
-		version: version,
-		runtimeFactory: func() (runtime.Runtime, error) {
-			return dockerruntime.NewFromEnv()
-		},
-		runner:    execRunner{},
-		sshRunner: execSSHRunner{},
+		version:    version,
+		socketPath: daemon.DefaultSocketPath,
+		runner:     execRunner{},
+		sshRunner:  execSSHRunner{},
 	}
 	for _, opt := range opts {
 		opt(cmd)
@@ -72,12 +60,10 @@ func New(version string, opts ...Option) *Command {
 	return cmd
 }
 
+// WithRuntime supplies the runtime for agent run only. Client commands never
+// access this runtime; their only host interface is the agent socket.
 func WithRuntime(rt runtime.Runtime) Option {
-	return func(c *Command) {
-		c.runtimeFactory = func() (runtime.Runtime, error) {
-			return rt, nil
-		}
-	}
+	return func(c *Command) { c.agentRuntime = rt }
 }
 
 func WithRunner(runner Runner) Option {
@@ -98,7 +84,21 @@ func (c *Command) Run(ctx context.Context, args []string, stdout io.Writer, stde
 		return 1
 	}
 
+	// Socket selection is invocation-local, including when a Command is reused.
+	invocation := *c
+	c = &invocation
 	var err error
+	switch args[0] {
+	case "status", "deploy", "logs", "events", "doctor", "remove", "rollback", "prune", "exec":
+		var rest []string
+		c.socketPath, rest, err = parseSocketFlag("serve "+args[0], args[1:])
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		c.socketExplicit = len(rest) != len(args)-1
+		args = append([]string{args[0]}, rest...)
+	}
 	switch args[0] {
 	case "help", "--help", "-h":
 		printHelp(stdout)
@@ -119,7 +119,7 @@ func (c *Command) Run(ctx context.Context, args []string, stdout io.Writer, stde
 	case "events":
 		err = c.runEvents(ctx, args[1:], stdout)
 	case "doctor":
-		err = c.runDoctor(ctx, stdout)
+		err = c.runDoctor(ctx, args[1:], stdout)
 	case "remove":
 		err = c.runRemove(ctx, args[1:], stdout)
 	case "rollback":
@@ -191,22 +191,13 @@ func (c *Command) runStatus(ctx context.Context, args []string, stdout io.Writer
 		}
 	}
 	if configPath != "" {
+		if c.socketExplicit {
+			return fmt.Errorf("serve status: --socket cannot be combined with --config")
+		}
 		return c.remoteStatus(ctx, configPath, stdout)
 	}
 
-	rt, err := c.runtimeFactory()
-	if err != nil {
-		return fmt.Errorf("serve status: create runtime: %w", err)
-	}
-	containers, err := managedContainers(ctx, rt, map[string]string{})
-	if err != nil {
-		return fmt.Errorf("serve status: list containers: %w", err)
-	}
-	if len(containers) == 0 {
-		fmt.Fprintln(stdout, "No Serve-managed containers found.")
-		return nil
-	}
-	return printStatus(stdout, containers)
+	return runAgentStatus(ctx, []string{"--socket", c.socketPath}, stdout)
 }
 
 // remoteStatus asks each configured host's agent for its status over SSH.
@@ -245,6 +236,9 @@ func (c *Command) runLogs(ctx context.Context, args []string, stdout io.Writer) 
 		return err
 	}
 	if host != "" {
+		if c.socketExplicit {
+			return fmt.Errorf("serve logs: --socket cannot be combined with --host")
+		}
 		container := ""
 		for i := 0; i < len(rest); i++ {
 			switch rest[i] {
@@ -272,21 +266,11 @@ func (c *Command) runLogs(ctx context.Context, args []string, stdout io.Writer) 
 	if err != nil {
 		return err
 	}
-	rt, err := c.runtimeFactory()
-	if err != nil {
-		return fmt.Errorf("serve logs: create runtime: %w", err)
+	query := url.Values{"container": {options.container}}
+	for key, value := range options.filters {
+		query.Set(strings.TrimPrefix(key, "serve."), value)
 	}
-	container, err := selectContainer(ctx, rt, options)
-	if err != nil {
-		return fmt.Errorf("serve logs: %w", err)
-	}
-	logs, err := rt.Logs(ctx, container.ID, runtime.LogOptions{})
-	if err != nil {
-		return fmt.Errorf("serve logs: stream %s: %w", container.Name, err)
-	}
-	defer logs.Close()
-	_, err = io.Copy(stdout, logs)
-	return err
+	return c.socketOutput(ctx, http.MethodGet, "/v1/logs?"+query.Encode(), nil, stdout)
 }
 
 func (c *Command) runEvents(ctx context.Context, args []string, stdout io.Writer) error {
@@ -302,6 +286,9 @@ func (c *Command) runEvents(ctx context.Context, args []string, stdout io.Writer
 		once = true
 	}
 	if host != "" {
+		if c.socketExplicit {
+			return fmt.Errorf("serve events: --socket cannot be combined with --host")
+		}
 		command := "sudo serve agent events"
 		if once {
 			command += " --once"
@@ -312,32 +299,33 @@ func (c *Command) runEvents(ctx context.Context, args []string, stdout io.Writer
 		}
 		return nil
 	}
-	rt, err := c.runtimeFactory()
+	response, err := agentSocketRequest(ctx, c.socketPath, http.MethodGet, "/v1/events")
 	if err != nil {
-		return fmt.Errorf("serve events: create runtime: %w", err)
+		return err
 	}
-	events, err := rt.Events(ctx)
-	if err != nil {
-		return fmt.Errorf("serve events: subscribe: %w", err)
-	}
+	defer response.Body.Close()
+	decoder := json.NewDecoder(response.Body)
 	for {
-		select {
-		case event, ok := <-events:
-			if !ok {
+		var event struct {
+			Type      string `json:"type"`
+			Name      string `json:"name"`
+			ExitCode  int    `json:"exit_code"`
+			OOMKilled bool   `json:"oom_killed"`
+		}
+		if err := decoder.Decode(&event); err != nil {
+			if errors.Is(err, io.EOF) {
 				return nil
 			}
-			fmt.Fprintf(stdout, "%s container=%s exit_code=%d oom=%t\n", event.Type, event.Name, event.ExitCode, event.OOMKilled)
-			if once {
-				return nil
-			}
-		case <-ctx.Done():
-			return ctx.Err()
+			return err
+		}
+		fmt.Fprintf(stdout, "%s container=%s exit_code=%d oom=%t\n", event.Type, event.Name, event.ExitCode, event.OOMKilled)
+		if once {
+			return nil
 		}
 	}
 }
 
-// runExec runs a command inside a managed container, locally through the
-// runtime or on a remote host through its serve binary.
+// runExec always asks the host agent to execute the command.
 func (c *Command) runExec(ctx context.Context, args []string, stdout io.Writer) error {
 	host := ""
 	container := ""
@@ -371,6 +359,12 @@ func (c *Command) runExec(ctx context.Context, args []string, stdout io.Writer) 
 	}
 
 	if host != "" {
+		if c.socketExplicit {
+			return fmt.Errorf("serve exec: --socket cannot be combined with --host")
+		}
+		if err := config.ValidateSSHHost(host); err != nil {
+			return fmt.Errorf("serve exec: %w", err)
+		}
 		quotedCommand := make([]string, len(command))
 		for i, arg := range command {
 			quotedCommand[i] = shellQuote(arg)
@@ -382,30 +376,22 @@ func (c *Command) runExec(ctx context.Context, args []string, stdout io.Writer) 
 		return nil
 	}
 
-	rt, err := c.runtimeFactory()
+	payload, err := json.Marshal(daemon.ExecRequest{Container: container, Command: command})
 	if err != nil {
-		return fmt.Errorf("serve exec: create runtime: %w", err)
+		return err
 	}
-	containers, err := managedContainers(ctx, rt, map[string]string{})
+	response, err := agentSocketRequestWithBody(ctx, c.socketPath, http.MethodPost, "/v1/exec", bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("serve exec: list containers: %w", err)
+		return err
 	}
-	var id runtime.ContainerID
-	for _, state := range containers {
-		if state.Name == container {
-			id = state.ID
-			break
-		}
+	defer response.Body.Close()
+	var result daemon.ExecResponse
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return err
 	}
-	if id == "" {
-		return fmt.Errorf("serve exec: container %s not found", container)
-	}
-	output, err := rt.ExecContainer(ctx, id, command)
-	if output != "" {
-		fmt.Fprint(stdout, output)
-	}
-	if err != nil {
-		return fmt.Errorf("serve exec: %w", err)
+	fmt.Fprint(stdout, result.Output)
+	if result.Error != "" {
+		return fmt.Errorf("serve exec: %s", result.Error)
 	}
 	return nil
 }
@@ -414,20 +400,29 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-func (c *Command) runDoctor(ctx context.Context, stdout io.Writer) error {
-	rt, err := c.runtimeFactory()
+func (c *Command) runDoctor(ctx context.Context, args []string, stdout io.Writer) error {
+	if len(args) != 0 {
+		return fmt.Errorf("serve doctor: unknown argument %s", args[0])
+	}
+	return c.socketOutput(ctx, http.MethodPost, "/v1/doctor", nil, stdout)
+}
+
+func (c *Command) socketOutput(ctx context.Context, method, path string, value any, stdout io.Writer) error {
+	var body io.Reader
+	if value != nil {
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(payload)
+	}
+	response, err := agentSocketRequestWithBody(ctx, c.socketPath, method, path, body)
 	if err != nil {
-		return fmt.Errorf("serve doctor: create runtime: %w", err)
+		return err
 	}
-	if _, err := rt.ListContainers(ctx, runtime.ContainerFilters{}); err != nil {
-		return fmt.Errorf("serve doctor: Docker reachable: failed: %w", err)
-	}
-	fmt.Fprintln(stdout, "Docker reachable: ok")
-	if err := rt.CreateNetwork(ctx, runtime.NetworkSpec{Name: "serve"}); err != nil {
-		return fmt.Errorf("serve doctor: serve network: failed: %w", err)
-	}
-	fmt.Fprintln(stdout, "serve network: ok")
-	return nil
+	defer response.Body.Close()
+	_, err = io.Copy(stdout, response.Body)
+	return err
 }
 
 func (c *Command) runRemove(ctx context.Context, args []string, stdout io.Writer) error {
@@ -438,22 +433,7 @@ func (c *Command) runRemove(ctx context.Context, args []string, stdout io.Writer
 	if !options.force {
 		return fmt.Errorf("serve remove: --force is required for now")
 	}
-	rt, err := c.runtimeFactory()
-	if err != nil {
-		return fmt.Errorf("serve remove: create runtime: %w", err)
-	}
-	containers, err := managedContainers(ctx, rt, options.filters)
-	if err != nil {
-		return fmt.Errorf("serve remove: list containers: %w", err)
-	}
-	for _, container := range containers {
-		_ = rt.StopContainer(ctx, container.ID, time.Second)
-		if err := rt.RemoveContainer(ctx, container.ID); err != nil {
-			return fmt.Errorf("serve remove: remove %s: %w", container.Name, err)
-		}
-	}
-	fmt.Fprintf(stdout, "Removed %d container(s)\n", len(containers))
-	return nil
+	return c.socketOutput(ctx, http.MethodPost, "/v1/remove", daemon.RemoveRequest{Force: options.force, Service: options.filters["serve.service"], Destination: options.filters["serve.destination"], Role: options.filters["serve.role"]}, stdout)
 }
 
 func (c *Command) runPrune(ctx context.Context, args []string, stdout io.Writer) error {
@@ -467,26 +447,7 @@ func (c *Command) runPrune(ctx context.Context, args []string, stdout io.Writer)
 	if !force {
 		return fmt.Errorf("serve prune: --force is required for now")
 	}
-	rt, err := c.runtimeFactory()
-	if err != nil {
-		return fmt.Errorf("serve prune: create runtime: %w", err)
-	}
-	containers, err := managedContainers(ctx, rt, map[string]string{})
-	if err != nil {
-		return fmt.Errorf("serve prune: list containers: %w", err)
-	}
-	removed := 0
-	for _, container := range containers {
-		if container.Running {
-			continue
-		}
-		if err := rt.RemoveContainer(ctx, container.ID); err != nil {
-			return fmt.Errorf("serve prune: remove %s: %w", container.Name, err)
-		}
-		removed++
-	}
-	fmt.Fprintf(stdout, "Pruned %d container(s)\n", removed)
-	return nil
+	return c.socketOutput(ctx, http.MethodPost, "/v1/prune", daemon.PruneRequest{Force: force}, stdout)
 }
 
 func (c *Command) runRollback(ctx context.Context, args []string, stdout io.Writer) error {
@@ -494,38 +455,7 @@ func (c *Command) runRollback(ctx context.Context, args []string, stdout io.Writ
 	if err != nil {
 		return err
 	}
-	store := agentstate.NewStore(options.stateDir)
-	desired, err := store.LoadLastGood(options.service, options.destination)
-	if err != nil {
-		return fmt.Errorf("serve rollback: load last-good state: %w", err)
-	}
-	rt, err := c.runtimeFactory()
-	if err != nil {
-		return fmt.Errorf("serve rollback: create runtime: %w", err)
-	}
-
-	sink := events.NewJSONSink(stdout)
-	rollbackEvent := healing.LifecycleEvent{
-		Service:     desired.Service,
-		Destination: desired.Destination,
-		Version:     desired.Version,
-		Actor:       "serve",
-	}
-	rollbackEvent.Name = "rollback_started"
-	if err := sink.Emit(ctx, rollbackEvent); err != nil {
-		return fmt.Errorf("serve rollback: %w", err)
-	}
-	// applyDesired runs the health-gated cutover engine: if the last-good
-	// version never becomes healthy, traffic stays on the current version.
-	if err := applyDesired(ctx, rt, desired, options.stateDir); err != nil {
-		return fmt.Errorf("serve rollback: %w", err)
-	}
-	rollbackEvent.Name = "rollback_completed"
-	if err := sink.Emit(ctx, rollbackEvent); err != nil {
-		return fmt.Errorf("serve rollback: %w", err)
-	}
-	fmt.Fprintf(stdout, "Rolled back %s %s to %s\n", desired.Service, desired.Destination, desired.Version)
-	return nil
+	return c.socketOutput(ctx, http.MethodPost, "/v1/rollback", daemon.RollbackRequest{Service: options.service, Destination: options.destination}, stdout)
 }
 
 func (c *Command) runSecrets(ctx context.Context, args []string, stdout io.Writer) error {
@@ -595,59 +525,6 @@ func parseContainerSelection(command string, args []string) (containerSelection,
 	return selection, nil
 }
 
-func selectContainer(ctx context.Context, rt runtime.Runtime, selection containerSelection) (runtime.ContainerState, error) {
-	containers, err := managedContainers(ctx, rt, selection.filters)
-	if err != nil {
-		return runtime.ContainerState{}, err
-	}
-	if selection.container != "" {
-		for _, container := range containers {
-			if container.Name == selection.container || string(container.ID) == selection.container {
-				return container, nil
-			}
-		}
-		return runtime.ContainerState{}, fmt.Errorf("container %s not found", selection.container)
-	}
-	if len(containers) == 0 {
-		return runtime.ContainerState{}, fmt.Errorf("no matching Serve-managed containers found")
-	}
-	if len(containers) > 1 {
-		return runtime.ContainerState{}, fmt.Errorf("multiple matching containers found; pass --container")
-	}
-	return containers[0], nil
-}
-
-func managedContainers(ctx context.Context, rt runtime.Runtime, labels map[string]string) ([]runtime.ContainerState, error) {
-	filters := map[string]string{"serve.managed": "true"}
-	for key, value := range labels {
-		if value != "" {
-			filters[key] = value
-		}
-	}
-	containers, err := rt.ListContainers(ctx, runtime.ContainerFilters{Labels: filters})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(containers, func(i, j int) bool { return containers[i].Name < containers[j].Name })
-	return containers, nil
-}
-
-func printStatus(stdout io.Writer, containers []runtime.ContainerState) error {
-	writer := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(writer, "SERVICE\tDESTINATION\tROLE\tVERSION\tCONTAINER\tSTATUS")
-	for _, container := range containers {
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			container.Labels["serve.service"],
-			container.Labels["serve.destination"],
-			container.Labels["serve.role"],
-			container.Labels["serve.version"],
-			container.Name,
-			status(container),
-		)
-	}
-	return writer.Flush()
-}
-
 type removeOptions struct {
 	force   bool
 	filters map[string]string
@@ -687,11 +564,10 @@ func parseRemoveOptions(args []string) (removeOptions, error) {
 type rollbackOptions struct {
 	service     string
 	destination string
-	stateDir    string
 }
 
 func parseRollbackOptions(args []string) (rollbackOptions, error) {
-	options := rollbackOptions{stateDir: ".serve/state"}
+	options := rollbackOptions{}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--service":
@@ -707,11 +583,7 @@ func parseRollbackOptions(args []string) (rollbackOptions, error) {
 			options.destination = args[i+1]
 			i++
 		case "--state-dir":
-			if i+1 >= len(args) {
-				return options, fmt.Errorf("serve rollback: --state-dir requires a value")
-			}
-			options.stateDir = args[i+1]
-			i++
+			return options, fmt.Errorf("serve rollback: --state-dir belongs on serve agent run; use --socket to select an agent")
 		default:
 			return options, fmt.Errorf("serve rollback: unknown argument %s", args[i])
 		}
@@ -759,24 +631,8 @@ func (c *Command) runAgent(ctx context.Context, args []string, stdout io.Writer)
 	if err := planner.ValidateDesired(desired); err != nil {
 		return fmt.Errorf("serve agent apply: %w", err)
 	}
-	if options.socketPath != "" {
-		payload, err := json.Marshal(desired)
-		if err != nil {
-			return fmt.Errorf("serve agent apply: encode desired state: %w", err)
-		}
-		response, err := agentSocketRequestWithBody(ctx, options.socketPath, http.MethodPut, "/v1/desired-state", bytes.NewReader(payload))
-		if err != nil {
-			return fmt.Errorf("serve agent apply: %w", err)
-		}
-		response.Body.Close()
-	} else {
-		rt, err := c.runtimeFactory()
-		if err != nil {
-			return fmt.Errorf("serve agent apply: create runtime: %w", err)
-		}
-		if err := applyDesired(ctx, rt, desired, options.stateDir); err != nil {
-			return fmt.Errorf("serve agent apply: %w", err)
-		}
+	if err := submitDesired(ctx, options.socketPath, desired); err != nil {
+		return fmt.Errorf("serve agent apply: %w", err)
 	}
 	fmt.Fprintf(stdout, "Applied desired state for %s %s %s\n", desired.Service, desired.Destination, desired.Version)
 	return nil
@@ -817,17 +673,13 @@ func (c *Command) runAgentDaemon(ctx context.Context, args []string, stdout io.W
 		}
 	}
 
-	rt, err := c.runtimeFactory()
-	if err != nil {
-		return fmt.Errorf("serve agent run: create runtime: %w", err)
-	}
-	fmt.Fprintf(stdout, "serve-agent listening on %s (state dir %s)\n", options.socketPath, options.stateDir)
-	return daemon.New(daemon.Config{
-		Runtime:           rt,
+	fmt.Fprintf(stdout, "serve-agent starting on %s (state dir %s)\n", options.socketPath, options.stateDir)
+	return daemon.Run(ctx, daemon.Config{
+		Runtime:           c.agentRuntime,
 		StateDir:          options.stateDir,
 		SocketPath:        options.socketPath,
 		ReconcileInterval: options.reconcileInterval,
-	}).Run(ctx)
+	})
 }
 
 type agentRunOptions struct {
@@ -844,6 +696,7 @@ func agentSocketRequest(ctx context.Context, socketPath string, method string, p
 
 func agentSocketRequestWithBody(ctx context.Context, socketPath string, method string, path string, body io.Reader) (*http.Response, error) {
 	client := &http.Client{Transport: &http.Transport{
+		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, _ string, _ string) (net.Conn, error) {
 			var dialer net.Dialer
 			return dialer.DialContext(ctx, "unix", socketPath)
@@ -853,9 +706,10 @@ func agentSocketRequestWithBody(ctx context.Context, socketPath string, method s
 	if err != nil {
 		return nil, err
 	}
+	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("contact agent socket %s (ensure serve agent run is running and you have socket access): %w", socketPath, err)
 	}
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
@@ -895,8 +749,12 @@ func parseSocketFlag(command string, args []string) (string, []string, error) {
 	socketPath := daemon.DefaultSocketPath
 	var rest []string
 	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			rest = append(rest, args[i:]...)
+			break
+		}
 		if args[i] == "--socket" {
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
 				return "", nil, fmt.Errorf("%s: --socket requires a value", command)
 			}
 			i++
@@ -908,8 +766,7 @@ func parseSocketFlag(command string, args []string) (string, []string, error) {
 	return socketPath, rest, nil
 }
 
-// runAgentReconcile pokes the local agent daemon over its Unix socket so it
-// picks up desired-state files written to disk.
+// runAgentReconcile asks the local agent to reconcile its persisted desired state.
 func runAgentReconcile(ctx context.Context, args []string, stdout io.Writer) error {
 	socketPath, rest, err := parseSocketFlag("serve agent reconcile", args)
 	if err != nil {
@@ -954,6 +811,10 @@ func runAgentStatus(ctx context.Context, args []string, stdout io.Writer) error 
 	var states []agentstate.ActualState
 	if err := json.NewDecoder(response.Body).Decode(&states); err != nil {
 		return fmt.Errorf("serve agent status: decode response: %w", err)
+	}
+	if len(states) == 0 {
+		fmt.Fprintln(stdout, "No Serve-managed containers found.")
+		return nil
 	}
 	writer := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(writer, "SERVICE\tDESTINATION\tROLE\tVERSION\tCONTAINER\tSTATUS")
@@ -1030,6 +891,9 @@ func (c *Command) runDeploy(ctx context.Context, args []string, stdout io.Writer
 	if err != nil {
 		return err
 	}
+	if !options.local && c.socketExplicit {
+		return fmt.Errorf("serve deploy: --socket requires --local")
+	}
 	configs, err := config.LoadServices(options.configPath)
 	if err != nil {
 		return fmt.Errorf("serve deploy: %w", err)
@@ -1046,39 +910,24 @@ func (c *Command) runDeploy(ctx context.Context, args []string, stdout io.Writer
 		}
 		configs = selected
 	}
-	if !options.local {
-		var deployments []remoteDeployment
-		for _, cfg := range configs {
-			secretsFile, err := secretsFileContent(cfg, options.configPath)
-			if err != nil {
-				return fmt.Errorf("serve deploy: %w", err)
-			}
-			planned, err := planRemoteDeploy(cfg, options, secretsFile)
-			if err != nil {
-				return err
-			}
-			deployments = append(deployments, planned...)
-		}
-		return c.applyRemoteDeployments(ctx, deployments, stdout)
-	}
-	desiredStates := make([]planner.DesiredState, 0, len(configs))
+	var deployments []remoteDeployment
 	for _, cfg := range configs {
 		secretsFile, err := secretsFileContent(cfg, options.configPath)
 		if err != nil {
 			return fmt.Errorf("serve deploy: %w", err)
 		}
-		desired, err := planner.Plan(cfg, planner.Options{Host: options.host, Version: options.version, SecretsFileContent: secretsFile})
+		planned, err := planRemoteDeploy(cfg, options, secretsFile)
 		if err != nil {
-			return fmt.Errorf("serve deploy: plan desired state: %w", err)
+			return err
 		}
-		desiredStates = append(desiredStates, desired)
+		deployments = append(deployments, planned...)
 	}
-	rt, err := c.runtimeFactory()
-	if err != nil {
-		return fmt.Errorf("serve deploy: create runtime: %w", err)
+	if !options.local {
+		return c.applyRemoteDeployments(ctx, deployments, stdout)
 	}
-	for _, desired := range desiredStates {
-		if err := applyDesired(ctx, rt, desired, options.stateDir); err != nil {
+	for _, deployment := range deployments {
+		desired := deployment.desired
+		if err := submitDesired(ctx, c.socketPath, desired); err != nil {
 			return fmt.Errorf("serve deploy: %w", err)
 		}
 		fmt.Fprintf(stdout, "Deployed %s %s %s locally\n", desired.Service, desired.Destination, desired.Version)
@@ -1092,10 +941,13 @@ type remoteDeployment struct {
 	payload []byte
 }
 
-// planRemoteDeploy computes every per-host desired state without contacting a
-// host, allowing the complete manifest to fail validation before deployment.
+// planRemoteDeploy computes selected per-host states for either transport,
+// allowing the complete manifest to fail validation before deployment.
 func planRemoteDeploy(cfg config.Config, options deployOptions, secretsFile string) ([]remoteDeployment, error) {
 	hosts := configHosts(cfg)
+	if options.local {
+		hosts = []string{options.host}
+	}
 	if len(hosts) == 0 {
 		return nil, fmt.Errorf("serve deploy: no hosts configured for service %s", cfg.Service)
 	}
@@ -1182,59 +1034,22 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-func applyDesired(ctx context.Context, rt runtime.Runtime, desired planner.DesiredState, stateDir string) error {
+func submitDesired(ctx context.Context, socket string, desired planner.DesiredState) error {
 	if err := agentstate.ValidateIdentity(desired.Service, desired.Destination); err != nil {
 		return err
 	}
-	store := agentstate.NewStore(stateDir)
-	engine := cutover.New(cutover.Deps{
-		Runtime:  rt,
-		Starter:  starterFor(rt, desired),
-		Health:   health.NewHTTPChecker(nil),
-		Proxy:    kamalproxy.New(rt, kamalproxy.Options{Network: desired.Network}),
-		LastGood: store,
-	})
-	if err := engine.Apply(ctx, desired); err != nil {
+	if err := planner.ValidateDesired(desired); err != nil {
 		return err
 	}
-	actual, err := actualState(ctx, rt, desired.Service, desired.Destination)
+	payload, err := json.Marshal(desired)
 	if err != nil {
 		return err
 	}
-	if err := store.SaveActual(actual); err != nil {
+	response, err := agentSocketRequestWithBody(ctx, socket, http.MethodPut, "/v1/desired-state", bytes.NewReader(payload))
+	if err != nil {
 		return err
 	}
-	return store.SaveDesired(desired)
-}
-
-func starterFor(rt runtime.Runtime, desired planner.DesiredState) *reconciler.Reconciler {
-	for _, container := range desired.Containers {
-		if len(container.SecretNames) > 0 {
-			return reconciler.NewWithSecrets(rt, sops.NewDefaultStore(), secrets.NewEnvFileWriter(secretEnvFileDir))
-		}
-	}
-	return reconciler.New(rt)
-}
-
-func actualState(ctx context.Context, rt runtime.Runtime, service string, destination string) (agentstate.ActualState, error) {
-	containers, err := rt.ListContainers(ctx, runtime.ContainerFilters{Labels: map[string]string{
-		"serve.managed":     "true",
-		"serve.service":     service,
-		"serve.destination": destination,
-	}})
-	if err != nil {
-		return agentstate.ActualState{}, err
-	}
-	actual := agentstate.ActualState{Service: service, Destination: destination}
-	for _, container := range containers {
-		actual.Containers = append(actual.Containers, agentstate.ActualContainer{
-			Name:    container.Name,
-			Role:    container.Labels["serve.role"],
-			Version: container.Labels["serve.version"],
-			Status:  status(container),
-		})
-	}
-	return actual, nil
+	return response.Body.Close()
 }
 
 func loadDesiredState(path string) (planner.DesiredState, error) {
@@ -1252,20 +1067,15 @@ func loadDesiredState(path string) (planner.DesiredState, error) {
 
 type agentApplyOptions struct {
 	path       string
-	stateDir   string
 	socketPath string
 }
 
 func parseAgentApplyOptions(args []string) (agentApplyOptions, error) {
-	options := agentApplyOptions{stateDir: ".serve/state"}
+	options := agentApplyOptions{socketPath: daemon.DefaultSocketPath}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--state-dir":
-			if i+1 >= len(args) {
-				return options, fmt.Errorf("serve agent apply: --state-dir requires a value")
-			}
-			options.stateDir = args[i+1]
-			i++
+			return options, fmt.Errorf("serve agent apply: --state-dir belongs on serve agent run; use --socket to select an agent")
 		case "--socket":
 			if i+1 >= len(args) {
 				return options, fmt.Errorf("serve agent apply: --socket requires a value")
@@ -1294,11 +1104,10 @@ type deployOptions struct {
 	service    string
 	host       string
 	version    string
-	stateDir   string
 }
 
 func parseDeployOptions(args []string) (deployOptions, error) {
-	options := deployOptions{configPath: "serve.yml", host: "localhost", version: "dev", stateDir: ".serve/state"}
+	options := deployOptions{configPath: "serve.yml", host: "localhost", version: "dev"}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--local":
@@ -1328,23 +1137,12 @@ func parseDeployOptions(args []string) (deployOptions, error) {
 			options.version = args[i+1]
 			i++
 		case "--state-dir":
-			if i+1 >= len(args) {
-				return options, fmt.Errorf("serve deploy: --state-dir requires a value")
-			}
-			options.stateDir = args[i+1]
-			i++
+			return options, fmt.Errorf("serve deploy: --state-dir belongs on serve agent run; use --socket to select an agent")
 		default:
 			return options, fmt.Errorf("serve deploy: unknown argument %s", args[i])
 		}
 	}
 	return options, nil
-}
-
-func status(container runtime.ContainerState) string {
-	if container.Running {
-		return "running"
-	}
-	return "stopped"
 }
 
 type execRunner struct{}
@@ -1382,26 +1180,29 @@ func printHelp(w io.Writer) {
 
 Implemented commands:
   init              Create a starter serve.yml
-  status            Show local Serve-managed Docker containers
+  status            Show containers through the local agent
   logs              Stream container logs
   events            Stream Docker runtime events
-  doctor            Validate local Docker basics
-  remove            Remove local Serve-managed containers
-  prune             Remove stopped Serve-managed containers
+  doctor            Ask the agent to check Docker and its network
+  remove            Remove workloads and their desired state
+  prune             Remove stopped, non-desired managed containers
   rollback          Apply the stored last-good desired state
   secrets edit      Edit SOPS-encrypted secrets
-  agent apply       Apply a desired-state JSON locally
+  agent apply       Submit desired-state JSON to the local agent
   agent run         Run the long-lived host agent daemon
   agent reconcile   Poke the local agent daemon to reconcile now
   agent status      Show status from the local agent daemon
   agent logs        Stream container logs from the local agent daemon
   agent events      Stream runtime events from the local agent daemon
   deploy            Upload desired state to remote hosts over SSH
-  deploy --local    Plan and apply a local desired state
+  deploy --local    Plan and submit desired state to the local agent
   exec              Run a command in a managed container (--host for remote)
   version           Print build version
   help              Show this help
 
+Local operations require a running agent: --socket PATH overrides
+/run/serve/agent.sock. There is no direct-Docker or standalone fallback.
+Only agent run accepts --state-dir. Local deploy --host selects a manifest host.
 Remote variants: status --config, logs --host, events --host, exec --host.
 
 Not implemented yet:

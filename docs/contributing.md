@@ -3,7 +3,7 @@
 ## Requirements
 
 - Go 1.26.6+
-- Docker, for local Docker commands and integration tests
+- Docker, for the host agent and Docker integration tests
 - `make`, optional but convenient
 
 ## Workflow
@@ -32,6 +32,16 @@ During development, you can run without building:
 ```sh
 go run ./cmd/serve --help
 ```
+
+## Local development agent
+
+All operational CLI commands use the agent socket, never Docker directly. Start a development agent in its own terminal:
+
+```sh
+serve agent run --socket /tmp/serve-dev.sock --state-dir .serve/state
+```
+
+Then use `serve deploy --local --socket /tmp/serve-dev.sock` and `serve status --socket /tmp/serve-dev.sock`. There is no daemonless mode. Do not point a development agent at Docker workloads already managed by another agent.
 
 ## Test
 
@@ -88,7 +98,7 @@ The skill tells an LLM to:
 
 ```txt
 cmd/serve                         CLI entrypoint
-internal/cli                      CLI command routing and local command implementations
+internal/cli                      planning, output formatting, SSH and agent API clients
 internal/config                   serve.yml parser/validator
 internal/planner                  desired-state planner
 internal/runtime                  runtime and network-alias interfaces
