@@ -509,16 +509,6 @@ func (d *Daemon) getDesired(key string) (planner.DesiredState, bool) {
 	return desired, ok
 }
 
-func (d *Daemon) desiredSnapshot() []planner.DesiredState {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	states := make([]planner.DesiredState, 0, len(d.desired))
-	for _, desired := range d.desired {
-		states = append(states, desired)
-	}
-	return states
-}
-
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(value); err != nil {
