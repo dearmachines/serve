@@ -2,8 +2,10 @@ package kamalproxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -100,7 +102,7 @@ func (m *Manager) SetTargets(ctx context.Context, service string, role string, t
 	defer m.mu.Unlock()
 
 	key := serviceKey(service, role)
-	current := m.routed[key]
+	current, known := m.routed[key]
 	opts.Hosts = append([]string(nil), opts.Hosts...)
 	sort.Strings(opts.Hosts)
 	next := routedService{route: opts}
@@ -108,7 +110,7 @@ func (m *Manager) SetTargets(ctx context.Context, service string, role string, t
 		next.addresses = addAddress(next.addresses, address(target))
 		next.healthPath = firstNonEmpty(target.HealthPath, next.healthPath)
 	}
-	return m.apply(ctx, key, current, next, false)
+	return m.apply(ctx, key, current, next, !known)
 }
 
 // apply reconciles the routed set for one kamal-proxy service. force issues
@@ -126,8 +128,8 @@ func (m *Manager) apply(ctx context.Context, service string, current routedServi
 	}
 
 	if len(next.addresses) == 0 {
-		if _, err := m.runtime.ExecContainer(ctx, proxyID, []string{"kamal-proxy", "remove", service}); err != nil {
-			return fmt.Errorf("kamal-proxy remove %s: %w", service, err)
+		if err := m.ensureRouteAbsent(ctx, proxyID, service); err != nil {
+			return err
 		}
 		m.routed[service] = routedService{healthPath: next.healthPath}
 		return nil
@@ -163,6 +165,22 @@ func (m *Manager) apply(ctx context.Context, service string, current routedServi
 	}
 	m.routed[service] = next
 	return nil
+}
+
+// ensureRouteAbsent consults the proxy itself, not the agent's volatile cache.
+// The proxy may have restored routes from its persistent volume. Only the pinned
+// CLI's specific not-found process exit is idempotent success; Docker failures
+// and other proxy errors must remain failures (and must not be cached).
+func (m *Manager) ensureRouteAbsent(ctx context.Context, id runtime.ContainerID, service string) error {
+	_, err := m.runtime.ExecContainer(ctx, id, []string{"kamal-proxy", "remove", service})
+	if err == nil {
+		return nil
+	}
+	var exit *runtime.ExecExitError
+	if errors.As(err, &exit) && exit.Code == 1 && strings.TrimSpace(exit.Output) == "Error: service not found" {
+		return nil
+	}
+	return fmt.Errorf("kamal-proxy remove %s: %w", service, err)
 }
 
 func sameRoutedService(a routedService, b routedService) bool {

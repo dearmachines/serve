@@ -25,6 +25,7 @@ import (
 	agentstate "github.com/uptimenine/serve/internal/agent/state"
 	"github.com/uptimenine/serve/internal/planner"
 	"github.com/uptimenine/serve/internal/runtime"
+	dockerruntime "github.com/uptimenine/serve/internal/runtime/docker"
 )
 
 const (
@@ -57,6 +58,8 @@ type Daemon struct {
 	store      *agentstate.Store
 	engine     *cutover.Engine
 	supervisor *healing.Supervisor
+	proxy      proxy.Manager
+	eventSink  healing.EventSink
 	socketPath string
 	interval   time.Duration
 	errorLog   io.Writer
@@ -65,7 +68,23 @@ type Daemon struct {
 	desired        map[string]planner.DesiredState
 	operationLocks map[string]*sync.Mutex
 	reconcileMu    sync.Mutex
-	background     sync.WaitGroup
+	// Maintenance excludes all lifecycle operations while remove/prune enumerate
+	// and mutate workloads. Ordinary operations still use per-service locks.
+	maintenance sync.RWMutex
+	background  sync.WaitGroup
+}
+
+// Run owns production Docker initialization. The CLI only supplies agent
+// configuration; all Docker access lives behind the agent boundary.
+func Run(ctx context.Context, cfg Config) error {
+	if cfg.Runtime == nil {
+		rt, err := dockerruntime.NewFromEnv()
+		if err != nil {
+			return fmt.Errorf("create agent runtime: %w", err)
+		}
+		cfg.Runtime = rt
+	}
+	return New(cfg).Run(ctx)
 }
 
 func New(cfg Config) *Daemon {
@@ -117,6 +136,8 @@ func New(cfg Config) *Daemon {
 		store:          store,
 		engine:         engine,
 		supervisor:     supervisor,
+		proxy:          cfg.ProxyManager,
+		eventSink:      cfg.EventSink,
 		socketPath:     cfg.SocketPath,
 		interval:       cfg.ReconcileInterval,
 		errorLog:       cfg.ErrorLog,
@@ -196,9 +217,8 @@ func (d *Daemon) startBackgroundReconcile(ctx context.Context, source string) {
 	}()
 }
 
-// reconcileAll reloads every persisted desired state and applies it. Desired
-// state files written directly to disk (e.g. by `serve agent apply` over
-// SSH) are picked up here.
+// reconcileAll enumerates identities, then reloads each desired state under
+// its operation lock. A snapshot taken before a deployment must never undo it.
 func (d *Daemon) reconcileAll(ctx context.Context) error {
 	states, err := d.store.ListDesired()
 	if err != nil {
@@ -207,20 +227,53 @@ func (d *Daemon) reconcileAll(ctx context.Context) error {
 
 	var errs []error
 	for _, desired := range states {
-		if err := d.applySerialized(ctx, desired); err != nil {
+		if err := d.reconcileOne(ctx, desired.Service, desired.Destination); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile %s %s: %w", desired.Service, desired.Destination, err))
-			continue
 		}
-		d.setDesired(desired)
 	}
 	return errors.Join(errs...)
 }
 
+func (d *Daemon) reconcileOne(ctx context.Context, service, destination string) error {
+	d.maintenance.RLock()
+	defer d.maintenance.RUnlock()
+	lock := d.operationLock(stateKey(service, destination))
+	lock.Lock()
+	defer lock.Unlock()
+	desired, err := d.store.LoadDesired(service, destination)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	} // Removed after enumeration.
+	if err != nil {
+		return err
+	}
+	if err := d.apply(ctx, desired); err != nil {
+		return err
+	}
+	d.setDesired(desired)
+	return nil
+}
+
 func (d *Daemon) applySerialized(ctx context.Context, desired planner.DesiredState) error {
+	d.maintenance.RLock()
+	defer d.maintenance.RUnlock()
 	lock := d.operationLock(stateKey(desired.Service, desired.Destination))
 	lock.Lock()
 	defer lock.Unlock()
-	return d.apply(ctx, desired)
+	return d.commitDesired(ctx, desired)
+}
+
+// commitDesired holds the operation lock through runtime changes, persistence,
+// and publication of the healing target. Callers must hold that lock.
+func (d *Daemon) commitDesired(ctx context.Context, desired planner.DesiredState) error {
+	if err := d.apply(ctx, desired); err != nil {
+		return err
+	}
+	if err := d.store.SaveDesired(desired); err != nil {
+		return err
+	}
+	d.setDesired(desired)
+	return nil
 }
 
 // apply runs one desired state through the cutover engine and records the
@@ -247,6 +300,8 @@ func (d *Daemon) handleEvent(ctx context.Context, event runtime.RuntimeEvent) {
 		return
 	}
 
+	d.maintenance.RLock()
+	defer d.maintenance.RUnlock()
 	key := stateKey(event.Labels["serve.service"], event.Labels["serve.destination"])
 	lock := d.operationLock(key)
 	lock.Lock()
@@ -276,34 +331,22 @@ func (d *Daemon) handler() http.Handler {
 	mux.HandleFunc("POST /v1/reconcile", d.handleReconcile)
 	mux.HandleFunc("GET /v1/logs", d.handleLogs)
 	mux.HandleFunc("GET /v1/events", d.handleEvents)
+	mux.HandleFunc("POST /v1/exec", d.handleExec)
+	mux.HandleFunc("POST /v1/doctor", d.handleDoctor)
+	mux.HandleFunc("POST /v1/remove", d.handleRemove)
+	mux.HandleFunc("POST /v1/prune", d.handlePrune)
+	mux.HandleFunc("POST /v1/rollback", d.handleRollback)
 	return mux
 }
 
 func (d *Daemon) handleLogs(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("container")
-	if name == "" {
-		http.Error(w, "container query parameter is required", http.StatusBadRequest)
-		return
-	}
-
-	containers, err := d.runtime.ListContainers(r.Context(), runtime.ContainerFilters{Labels: map[string]string{"serve.managed": "true"}})
+	query := r.URL.Query()
+	container, err := d.selectContainer(r.Context(), query.Get("container"), map[string]string{"serve.service": query.Get("service"), "serve.destination": query.Get("destination"), "serve.role": query.Get("role")})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), selectionErrorStatus(err))
 		return
 	}
-	var id runtime.ContainerID
-	for _, container := range containers {
-		if container.Name == name {
-			id = container.ID
-			break
-		}
-	}
-	if id == "" {
-		http.Error(w, fmt.Sprintf("container %s not found", name), http.StatusNotFound)
-		return
-	}
-
-	logs, err := d.runtime.Logs(r.Context(), id, runtime.LogOptions{})
+	logs, err := d.runtime.Logs(r.Context(), container.ID, runtime.LogOptions{})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -370,24 +413,31 @@ func (d *Daemon) handlePutDesiredState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := d.store.SaveDesired(desired); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	d.setDesired(desired)
 	writeJSON(w, map[string]string{"status": "applied", "version": desired.Version})
 }
 
 func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
-	desiredStates := d.desiredSnapshot()
-	states := make([]agentstate.ActualState, 0, len(desiredStates))
-	for _, desired := range desiredStates {
-		actual, err := d.actualState(r.Context(), desired.Service, desired.Destination)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+	containers, err := d.managedContainers(r.Context(), nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	states := []agentstate.ActualState{}
+	indices := map[string]int{}
+	for _, container := range containers {
+		service, destination := container.Labels["serve.service"], container.Labels["serve.destination"]
+		key := stateKey(service, destination)
+		i, ok := indices[key]
+		if !ok {
+			i = len(states)
+			indices[key] = i
+			states = append(states, agentstate.ActualState{Service: service, Destination: destination})
 		}
-		states = append(states, actual)
+		status := "stopped"
+		if container.Running {
+			status = "running"
+		}
+		states[i].Containers = append(states[i].Containers, agentstate.ActualContainer{Name: container.Name, Role: container.Labels["serve.role"], Version: container.Labels["serve.version"], Status: status})
 	}
 	writeJSON(w, states)
 }
@@ -457,16 +507,6 @@ func (d *Daemon) getDesired(key string) (planner.DesiredState, bool) {
 	defer d.mu.RUnlock()
 	desired, ok := d.desired[key]
 	return desired, ok
-}
-
-func (d *Daemon) desiredSnapshot() []planner.DesiredState {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	states := make([]planner.DesiredState, 0, len(d.desired))
-	for _, desired := range d.desired {
-		states = append(states, desired)
-	}
-	return states
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

@@ -38,7 +38,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart serve-agent
 ```
 
-For `serve deploy --local`, Serve uses the invoking user's Docker configuration instead.
+`serve deploy --local` uses the same agent and therefore the same **agent user's** Docker configuration as remote deploy. The CLI user's Docker configuration is not used. For a development agent started manually with `serve agent run`, configure credentials in that agent process's environment.
 
 Credentials remain host-side and are passed in memory to the Docker API. They must not appear in `serve.yml`, desired state, logs, or command-line arguments. Serve does not install credential helpers, create cloud identities, or run `docker login` for you.
 

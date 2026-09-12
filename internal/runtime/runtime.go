@@ -2,11 +2,26 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
 type ContainerID string
+
+// ExecExitError reports a completed container command with a nonzero exit code,
+// distinct from Docker transport, attach, or inspection failures.
+type ExecExitError struct {
+	Command []string
+	Code    int
+	Output  string
+}
+
+func (e *ExecExitError) ExitStatus() int { return e.Code }
+func (e *ExecExitError) Error() string {
+	return fmt.Sprintf("exec %q exited with code %d: %s", strings.Join(e.Command, " "), e.Code, strings.TrimSpace(e.Output))
+}
 
 type Runtime interface {
 	PullImage(ctx context.Context, image string) error

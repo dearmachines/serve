@@ -64,7 +64,7 @@ func (s *JSONSink) Emit(ctx context.Context, event healing.LifecycleEvent) error
 
 func level(event string) string {
 	switch event {
-	case "restart_loop_detected":
+	case "restart_loop_detected", "rollback_failed":
 		return "error"
 	case "container_exited", "container_restarted", "container_recreated", "container_unhealthy", "container_oom_killed":
 		return "warn"

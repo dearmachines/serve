@@ -4,6 +4,7 @@ package docker_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -287,6 +288,32 @@ func TestDockerRuntimeStreamsPlainLogs(t *testing.T) {
 	}
 	if string(contents) != "serve-log-line\n" {
 		t.Fatalf("expected plain log output, got %q", string(contents))
+	}
+}
+
+func TestDockerExecDistinguishesProcessExitFromTransportFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rt := newDockerRuntime(t)
+	if err := rt.PullImage(ctx, testImage); err != nil {
+		t.Fatal(err)
+	}
+	id, err := rt.CreateContainer(ctx, runtime.ContainerSpec{Name: testContainerName(t, "exec-exit"), Image: testImage, Command: []string{"sleep", "60"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeContainer(t, rt, id)
+	if err := rt.StartContainer(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	output, err := rt.ExecContainer(ctx, id, []string{"sh", "-c", "printf 'Error: service not found\\n' >&2; exit 1"})
+	var exit interface{ ExitStatus() int }
+	if !errors.As(err, &exit) || exit.ExitStatus() != 1 || output != "Error: service not found\n" {
+		t.Fatalf("expected classified process exit: output=%q err=%v", output, err)
+	}
+	_, err = rt.ExecContainer(ctx, runtime.ContainerID("nonexistent-serve-exec-container"), []string{"true"})
+	if err == nil || errors.As(err, &exit) {
+		t.Fatalf("transport failure classified as process exit: %v", err)
 	}
 }
 
