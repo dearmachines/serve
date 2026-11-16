@@ -215,6 +215,9 @@ func (r *Runtime) Events(ctx context.Context) (<-chan runtime.RuntimeEvent, erro
 	return out, nil
 }
 
+// MaxExecOutputBytes caps how much exec output the agent buffers in memory.
+const MaxExecOutputBytes = 10 << 20
+
 func (r *Runtime) ExecContainer(ctx context.Context, id runtime.ContainerID, cmd []string) (string, error) {
 	exec, err := r.client.ContainerExecCreate(ctx, string(id), container.ExecOptions{
 		Cmd:          cmd,
@@ -231,9 +234,20 @@ func (r *Runtime) ExecContainer(ctx context.Context, id runtime.ContainerID, cmd
 	}
 	defer attach.Close()
 
-	var output strings.Builder
-	if _, err := stdcopy.StdCopy(&output, &output, attach.Reader); err != nil {
+	// The attach stream is controlled by the workload and does not observe
+	// ctx on its own; close it on cancellation so the read below returns.
+	stop := context.AfterFunc(ctx, attach.Close)
+	defer stop()
+
+	output := &cappedBuffer{limit: MaxExecOutputBytes}
+	if _, err := stdcopy.StdCopy(output, output, attach.Reader); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return output.String(), fmt.Errorf("exec: %w", ctxErr)
+		}
 		return output.String(), err
+	}
+	if output.truncated {
+		return output.String(), fmt.Errorf("exec output truncated at %d bytes", MaxExecOutputBytes)
 	}
 
 	inspect, err := r.client.ContainerExecInspect(ctx, exec.ID)
@@ -244,6 +258,25 @@ func (r *Runtime) ExecContainer(ctx context.Context, id runtime.ContainerID, cmd
 		return output.String(), &runtime.ExecExitError{Command: append([]string(nil), cmd...), Code: inspect.ExitCode, Output: output.String()}
 	}
 	return output.String(), nil
+}
+
+// cappedBuffer keeps at most limit bytes and silently discards the rest so
+// the stream is still drained to completion.
+type cappedBuffer struct {
+	strings.Builder
+	limit     int
+	truncated bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - b.Len(); room < len(p) {
+		b.truncated = true
+		if room > 0 {
+			b.Builder.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	return b.Builder.Write(p)
 }
 
 func (r *Runtime) CreateNetwork(ctx context.Context, spec runtime.NetworkSpec) error {

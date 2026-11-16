@@ -103,6 +103,10 @@ If `image` has no tag, Serve appends the value passed to `--version`. The exampl
 
 Serve starts the new containers, waits for their health checks, switches proxy traffic, and then retires the previous containers according to `retain_containers`.
 
+A health probe without `timeout` gives up after 5 seconds. Probes do not follow redirects; any 2xx or 3xx response counts as healthy.
+
+When the agent restarts a crashed container and `restart.initial_backoff` is not set, the first restart is immediate and later restarts wait 1s, 2s, 4s, and so on. The wait is capped at `restart.max_backoff`, or 1 minute when that is not set. The attempt counter resets after a quiet period of `restart.window`, or 10 minutes when that is not set. Each service heals independently, so one crash-looping service does not delay healing of the others.
+
 ## Local operation uses the agent too
 
 The CLI never calls Docker directly. Deployment, status, logs, events, exec, doctor, rollback, remove, and prune all use the host agent API. Remote commands reach it through SSH; local commands use `/run/serve/agent.sock` (override with `--socket PATH`). If the agent is unavailable, commands fail—there is no standalone fallback.

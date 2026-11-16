@@ -588,13 +588,16 @@ func healthPolicy(check *planner.Healthcheck) (time.Duration, int) {
 	return interval, retries
 }
 
+// healthTimeout always returns a positive bound: probes run under the
+// reconcile and service locks, so an unconfigured timeout must not let a
+// hanging workload stall the agent.
 func healthTimeout(check *planner.Healthcheck) time.Duration {
 	if check == nil || check.Timeout == "" {
-		return 0
+		return health.DefaultProbeTimeout
 	}
 	timeout, err := time.ParseDuration(check.Timeout)
 	if err != nil || timeout <= 0 {
-		return 0
+		return health.DefaultProbeTimeout
 	}
 	return timeout
 }

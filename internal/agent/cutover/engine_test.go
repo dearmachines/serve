@@ -636,6 +636,37 @@ func TestCandidateBecomesHealthyAfterPolling(t *testing.T) {
 	}
 }
 
+type anyDeadlineChecker struct {
+	sawNoDeadline bool
+}
+
+func (c *anyDeadlineChecker) Check(ctx context.Context, target health.Target) (health.Status, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		c.sawNoDeadline = true
+	}
+	return health.Healthy, nil
+}
+
+func TestHealthProbeWithoutConfiguredTimeoutStillHasDeadline(t *testing.T) {
+	env := newEnv(t)
+	checker := &anyDeadlineChecker{}
+	engine := cutover.New(cutover.Deps{
+		Runtime:  env.rt,
+		Starter:  reconciler.New(env.rt),
+		Health:   checker,
+		Proxy:    env.proxy,
+		LastGood: env.store,
+		Sleeper:  noopSleeper{},
+	})
+
+	if err := engine.Apply(context.Background(), desiredState("abc123", 1, false)); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if checker.sawNoDeadline {
+		t.Fatal("health probe ran without a deadline; a hanging workload could hold the agent locks forever")
+	}
+}
+
 func TestSwitchTrafficPassesProxyRouteOptions(t *testing.T) {
 	env := newEnv(t)
 

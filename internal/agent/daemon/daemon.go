@@ -47,6 +47,7 @@ type Config struct {
 	SecretStore   secrets.Store
 	EnvFileDir    string
 	EventSink     healing.EventSink
+	HealSleeper   healing.Sleeper
 	ErrorLog      io.Writer
 }
 
@@ -67,6 +68,7 @@ type Daemon struct {
 	mu             sync.RWMutex
 	desired        map[string]planner.DesiredState
 	operationLocks map[string]*sync.Mutex
+	healQueues     map[string]chan runtime.RuntimeEvent
 	reconcileMu    sync.Mutex
 	// Maintenance excludes all lifecycle operations while remove/prune enumerate
 	// and mutate workloads. Ordinary operations still use per-service locks.
@@ -129,6 +131,7 @@ func New(cfg Config) *Daemon {
 		healing.WithReconciler(starter),
 		healing.WithProxyManager(cfg.ProxyManager),
 		healing.WithEventSink(cfg.EventSink),
+		healing.WithSleeper(cfg.HealSleeper),
 	)
 
 	return &Daemon{
@@ -143,6 +146,7 @@ func New(cfg Config) *Daemon {
 		errorLog:       cfg.ErrorLog,
 		desired:        map[string]planner.DesiredState{},
 		operationLocks: map[string]*sync.Mutex{},
+		healQueues:     map[string]chan runtime.RuntimeEvent{},
 	}
 }
 
@@ -176,6 +180,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	d.startBackgroundReconcile(ctx, "initial")
 	defer d.background.Wait()
+	// Heal workers live until ctx ends; cancel before waiting on them even
+	// when Run returns because the API server failed.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	ticker := time.NewTicker(d.interval)
 	defer ticker.Stop()
@@ -196,7 +204,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				}
 				return fmt.Errorf("runtime event stream closed")
 			}
-			d.handleEvent(ctx, event)
+			d.dispatchEvent(ctx, event)
 		case <-ticker.C:
 			d.startBackgroundReconcile(ctx, "periodic")
 		}
@@ -293,6 +301,50 @@ func (d *Daemon) apply(ctx context.Context, desired planner.DesiredState) error 
 		return err
 	}
 	return d.store.SaveActual(actual)
+}
+
+// healQueueSize bounds buffered runtime events per service. When a service
+// floods events faster than it can heal (e.g. a crash loop waiting out its
+// backoff), extra events are dropped; periodic reconcile restores any
+// container whose event was lost.
+const healQueueSize = 32
+
+// dispatchEvent hands an event to its service's heal worker without
+// blocking, so one service's backoff or slow heal never delays the event
+// loop or healing of other services. Events for one service stay ordered.
+func (d *Daemon) dispatchEvent(ctx context.Context, event runtime.RuntimeEvent) {
+	if event.Labels["serve.managed"] != "true" {
+		return
+	}
+	key := stateKey(event.Labels["serve.service"], event.Labels["serve.destination"])
+
+	d.mu.Lock()
+	queue, ok := d.healQueues[key]
+	if !ok {
+		queue = make(chan runtime.RuntimeEvent, healQueueSize)
+		d.healQueues[key] = queue
+		d.background.Add(1)
+		go d.healWorker(ctx, queue)
+	}
+	d.mu.Unlock()
+
+	select {
+	case queue <- event:
+	default:
+		d.logError("heal queue full for %s; dropping %s event for %s", key, event.Type, event.Name)
+	}
+}
+
+func (d *Daemon) healWorker(ctx context.Context, queue <-chan runtime.RuntimeEvent) {
+	defer d.background.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-queue:
+			d.handleEvent(ctx, event)
+		}
+	}
 }
 
 func (d *Daemon) handleEvent(ctx context.Context, event runtime.RuntimeEvent) {

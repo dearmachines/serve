@@ -123,28 +123,48 @@ func (d *Daemon) handleExec(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "container and command are required", 400)
 		return
 	}
-	d.maintenance.RLock()
-	defer d.maintenance.RUnlock()
-	c, err := d.selectContainer(r.Context(), request.Container, nil)
-	if err != nil {
-		http.Error(w, err.Error(), selectionErrorStatus(err))
+	c, ok := d.selectExecContainer(w, r, request.Container)
+	if !ok {
 		return
 	}
-	lock := d.operationLock(stateKey(c.Labels["serve.service"], c.Labels["serve.destination"]))
-	lock.Lock()
-	defer lock.Unlock()
-	c, err = d.selectContainer(r.Context(), request.Container, nil)
-	if err != nil {
-		http.Error(w, err.Error(), selectionErrorStatus(err))
-		return
-	}
-	output, err := d.runtime.ExecContainer(r.Context(), c.ID, request.Command)
+	// Locks are released before the exec runs: the stream is controlled by
+	// the workload and may never end, so it must not stall reconcile,
+	// healing, or maintenance. If the container is replaced mid-exec, the
+	// exec simply fails.
+	ctx, cancel := context.WithTimeout(r.Context(), MaxExecDuration)
+	defer cancel()
+	output, err := d.runtime.ExecContainer(ctx, c.ID, request.Command)
 	result := ExecResponse{Output: output}
 	if err != nil {
 		result.Error = err.Error()
 	}
 	writeJSON(w, result)
 }
+
+// MaxExecDuration bounds a single `serve exec` request.
+const MaxExecDuration = 30 * time.Minute
+
+// selectExecContainer resolves the exec target under the maintenance and
+// service locks so selection does not race a deploy, then releases them.
+func (d *Daemon) selectExecContainer(w http.ResponseWriter, r *http.Request, name string) (runtime.ContainerState, bool) {
+	d.maintenance.RLock()
+	defer d.maintenance.RUnlock()
+	c, err := d.selectContainer(r.Context(), name, nil)
+	if err != nil {
+		http.Error(w, err.Error(), selectionErrorStatus(err))
+		return runtime.ContainerState{}, false
+	}
+	lock := d.operationLock(stateKey(c.Labels["serve.service"], c.Labels["serve.destination"]))
+	lock.Lock()
+	defer lock.Unlock()
+	c, err = d.selectContainer(r.Context(), name, nil)
+	if err != nil {
+		http.Error(w, err.Error(), selectionErrorStatus(err))
+		return runtime.ContainerState{}, false
+	}
+	return c, true
+}
+
 func (d *Daemon) handleDoctor(w http.ResponseWriter, r *http.Request) {
 	if _, err := d.runtime.ListContainers(r.Context(), runtime.ContainerFilters{}); err != nil {
 		http.Error(w, "Docker reachable: failed: "+err.Error(), 500)

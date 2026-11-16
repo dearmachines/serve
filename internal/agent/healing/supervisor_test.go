@@ -173,6 +173,76 @@ func TestFailuresOutsideRestartWindowResetAttemptCounter(t *testing.T) {
 	}
 }
 
+func crashLoop(t *testing.T, rt *fake.Runtime, supervisor *healing.Supervisor, desired planner.DesiredState, times int) {
+	t.Helper()
+	for range times {
+		container := runningContainer(t, rt)
+		rt.Die(container.ID, 1, false)
+		if _, err := supervisor.HandleRuntimeEvent(context.Background(), dieEvent(container, 1, false), desired); err != nil {
+			t.Fatalf("handle die event: %v", err)
+		}
+	}
+}
+
+func TestUnconfiguredRestartStillBacksOffWithCap(t *testing.T) {
+	rt := fake.NewRuntime()
+	desired := desiredState("abc123")
+	desired.Containers[0].Restart = planner.Restart{Policy: "always", Controller: "agent"}
+	seedDesiredContainer(t, rt, desired)
+	sleeper := &recordingSleeper{}
+	supervisor := healing.NewSupervisor(rt, healing.WithSleeper(sleeper))
+
+	crashLoop(t, rt, supervisor, desired, 9)
+
+	// The first restart is immediate; repeats back off and cap at a minute.
+	expected := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 32 * time.Second, time.Minute, time.Minute}
+	if len(sleeper.durations) != len(expected) {
+		t.Fatalf("backoff durations = %v, want %v", sleeper.durations, expected)
+	}
+	for i := range expected {
+		if sleeper.durations[i] != expected[i] {
+			t.Fatalf("backoff durations = %v, want %v", sleeper.durations, expected)
+		}
+	}
+}
+
+func TestBackoffWithoutMaxNeverOverflows(t *testing.T) {
+	rt := fake.NewRuntime()
+	desired := desiredState("abc123")
+	desired.Containers[0].Restart = planner.Restart{Policy: "always", Controller: "agent", InitialBackoff: "1s"}
+	seedDesiredContainer(t, rt, desired)
+	sleeper := &recordingSleeper{}
+	supervisor := healing.NewSupervisor(rt, healing.WithSleeper(sleeper))
+
+	crashLoop(t, rt, supervisor, desired, 80)
+
+	for i, d := range sleeper.durations {
+		if d <= 0 || d > healing.DefaultMaxBackoff {
+			t.Fatalf("attempt %d backoff = %v, want within (0, %v]", i+1, d, healing.DefaultMaxBackoff)
+		}
+	}
+}
+
+func TestQuietPeriodResetsDefaultBackoff(t *testing.T) {
+	rt := fake.NewRuntime()
+	desired := desiredState("abc123")
+	desired.Containers[0].Restart = planner.Restart{Policy: "always", Controller: "agent"}
+	seedDesiredContainer(t, rt, desired)
+	sleeper := &recordingSleeper{}
+	clock := &fakeClock{current: time.Now()}
+	supervisor := healing.NewSupervisor(rt, healing.WithSleeper(sleeper), healing.WithClock(clock.Now))
+
+	crashLoop(t, rt, supervisor, desired, 4)
+	before := len(sleeper.durations)
+	clock.current = clock.current.Add(healing.DefaultRestartWindow + time.Second)
+	crashLoop(t, rt, supervisor, desired, 2)
+
+	after := sleeper.durations[before:]
+	if len(after) != 1 || after[0] != time.Second {
+		t.Fatalf("backoff after quiet period = %v, want immediate restart then 1s", after)
+	}
+}
+
 type fakeClock struct {
 	current time.Time
 }
