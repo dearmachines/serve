@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1643,5 +1644,27 @@ func TestWorkloadOutputIsByteExactWhenNotATerminal(t *testing.T) {
 	}
 	if stdout.String() != hostile {
 		t.Fatalf("piped output = %q, want byte-exact", stdout.String())
+	}
+}
+
+type failingSSHRunner struct{ err error }
+
+func (r failingSSHRunner) Run(context.Context, string, string, io.Reader, io.Writer) error {
+	return r.err
+}
+
+func TestErrorsCarryingWorkloadTextAreSanitizedOnTerminals(t *testing.T) {
+	// Remote stderr and exec exit errors embed workload output in the error.
+	ssh := failingSSHRunner{err: errors.New("exit status 1: \x1b]52;c;ZXZpbA==\a\x1b[2J")}
+	terminal := cli.WithTerminalDetector(func(io.Writer) bool { return true })
+	var stderr bytes.Buffer
+
+	code := cli.New("test", cli.WithSSHRunner(ssh), terminal).Run(context.Background(), []string{"exec", "--host", "app1.example.com", "--container", "c", "--", "ls"}, io.Discard, &stderr)
+
+	if code == 0 {
+		t.Fatal("expected failure")
+	}
+	if strings.ContainsAny(stderr.String(), "\x1b\a") || !strings.Contains(stderr.String(), "exit status 1") {
+		t.Fatalf("stderr = %q, want escape sequences neutralized", stderr.String())
 	}
 }

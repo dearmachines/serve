@@ -81,6 +81,9 @@ func WithSSHRunner(runner SSHRunner) Option {
 }
 
 func (c *Command) Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
+	// Error text can carry workload bytes (exec exit output, remote stderr
+	// over SSH), so it is sanitized on a terminal like workload output.
+	stderr = workloadOutput(stderr, false, c.isTerminal)
 	if len(args) == 0 {
 		printHelp(stderr)
 		return 1
@@ -726,11 +729,7 @@ func agentSocketRequestWithBody(ctx context.Context, socketPath string, method s
 	client := &http.Client{Transport: &http.Transport{
 		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, _ string, _ string) (net.Conn, error) {
-			if err := verifyAgentSocket(socketPath); err != nil {
-				return nil, err
-			}
-			var dialer net.Dialer
-			return dialer.DialContext(ctx, "unix", socketPath)
+			return dialVerifiedAgent(ctx, socketPath, trustedAgentUIDs())
 		},
 	}}
 	request, err := http.NewRequestWithContext(ctx, method, "http://serve-agent"+path, body)
