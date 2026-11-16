@@ -577,11 +577,28 @@ func validate(cfg Config) error {
 		}
 	}
 
+	switch cfg.Proxy.SSL {
+	case "", "auto", "true", "false":
+	default:
+		// Anything else would silently deploy an HTTP-only route.
+		problems = append(problems, fmt.Sprintf("proxy.ssl must be auto, true, or false, got %q", cfg.Proxy.SSL))
+	}
+	for _, host := range cfg.Proxy.Hosts {
+		if !proxyHostPattern.MatchString(host) {
+			problems = append(problems, fmt.Sprintf("proxy.hosts: %q is not a valid hostname", host))
+		}
+	}
+
 	if len(problems) > 0 {
 		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))
 	}
 	return nil
 }
+
+// proxyHostPattern accepts DNS hostnames with an optional leading "*."
+// wildcard label. It rejects commas, spaces, and other characters that
+// kamal-proxy's --host flag would interpret.
+var proxyHostPattern = regexp.MustCompile(`^(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
 
 func ValidateSSHHost(host string) error {
 	if !sshHostPattern.MatchString(host) {

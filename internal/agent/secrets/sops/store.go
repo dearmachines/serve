@@ -54,7 +54,7 @@ func (s *Store) Resolve(ctx context.Context, req secrets.Request) (map[string]st
 		path = tmpPath
 	}
 
-	output, err := s.runner.Run(ctx, "sops", "--decrypt", "--output-type", "yaml", path)
+	output, err := s.runner.Run(ctx, "sops", "--decrypt", "--output-type", "yaml", "--", path)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt sops secrets %q: %w", req.Ref, err)
 	}

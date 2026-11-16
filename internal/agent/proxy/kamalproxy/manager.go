@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -14,7 +15,9 @@ import (
 )
 
 const (
-	DefaultImage         = "basecamp/kamal-proxy:v0.8.4"
+	// DefaultImage pins kamal-proxy v0.8.4 by digest so a moved tag cannot
+	// change the proxy that fronts every service.
+	DefaultImage         = "basecamp/kamal-proxy:v0.8.4@sha256:b46ad3ec565dea7f2a36ebc7837a6cbc0996fa1735db5429f9d2301d292c60fb"
 	DefaultContainerName = "serve-proxy"
 	DefaultDeployTimeout = 30 * time.Second
 	DefaultDrainTimeout  = 30 * time.Second
@@ -261,9 +264,9 @@ func (m *Manager) ensureProxy(ctx context.Context) (runtime.ContainerID, error) 
 		}
 	}
 
-	if err := m.runtime.PullImage(ctx, m.opts.Image); err != nil {
-		return "", fmt.Errorf("pull proxy image %s: %w", m.opts.Image, err)
-	}
+	// A pull failure is tolerated when the image is already present: the
+	// registry being down must not keep the proxy from restarting.
+	pullErr := m.runtime.PullImage(ctx, m.opts.Image)
 	id, err := m.runtime.CreateContainer(ctx, runtime.ContainerSpec{
 		Name:  m.opts.ContainerName,
 		Image: m.opts.Image,
@@ -280,6 +283,9 @@ func (m *Manager) ensureProxy(ctx context.Context) (runtime.ContainerID, error) 
 		Volumes: []string{"serve-proxy-data:/home/kamal-proxy/.config/kamal-proxy"},
 	})
 	if err != nil {
+		if pullErr != nil {
+			return "", errors.Join(fmt.Errorf("pull proxy image %s: %w", m.opts.Image, pullErr), fmt.Errorf("create proxy container: %w", err))
+		}
 		return "", fmt.Errorf("create proxy container: %w", err)
 	}
 	if err := m.runtime.StartContainer(ctx, id); err != nil {
@@ -346,6 +352,8 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// formatTimeout renders whole seconds for kamal-proxy, rounding up so a
+// sub-second setting never becomes 0s.
 func formatTimeout(d time.Duration) string {
-	return fmt.Sprintf("%ds", int(d.Seconds()))
+	return fmt.Sprintf("%ds", int64(math.Ceil(d.Seconds())))
 }

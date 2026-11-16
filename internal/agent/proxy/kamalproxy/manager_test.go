@@ -602,3 +602,34 @@ func countExecs(rt *fakeruntime.Runtime, prefix string) int {
 	}
 	return count
 }
+
+func TestDefaultProxyImageIsPinnedByDigest(t *testing.T) {
+	if !strings.Contains(kamalproxy.DefaultImage, "@sha256:") {
+		t.Fatalf("DefaultImage %q is tag-addressed; a moved tag would change the root-adjacent proxy", kamalproxy.DefaultImage)
+	}
+}
+
+func TestProxyPullFailureIsToleratedWhenImageIsLocal(t *testing.T) {
+	rt := fakeruntime.NewRuntime()
+	rt.SetPullError(errors.New("registry unreachable"))
+	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+
+	if err := manager.AddTarget(context.Background(), webTarget()); err != nil {
+		t.Fatalf("proxy could not start from the local image while the registry was down: %v", err)
+	}
+}
+
+func TestSubSecondTimeoutsRoundUpInsteadOfDisablingThem(t *testing.T) {
+	rt := fakeruntime.NewRuntime()
+	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+
+	err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{webTarget()}, proxy.RouteOptions{DeployTimeout: 500 * time.Millisecond, DrainTimeout: 1500 * time.Millisecond})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := findExec(t, rt, "kamal-proxy deploy")
+	if !strings.Contains(exec, "--deploy-timeout=1s") || !strings.Contains(exec, "--drain-timeout=2s") {
+		t.Fatalf("timeouts not rounded up: %s", exec)
+	}
+}

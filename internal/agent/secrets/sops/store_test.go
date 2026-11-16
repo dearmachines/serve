@@ -41,7 +41,7 @@ UNUSED: not-requested
 	if runner.name != "sops" {
 		t.Fatalf("expected sops command, got %q", runner.name)
 	}
-	expectedArgs := []string{"--decrypt", "--output-type", "yaml", "/etc/serve/serve.secrets.yml"}
+	expectedArgs := []string{"--decrypt", "--output-type", "yaml", "--", "/etc/serve/serve.secrets.yml"}
 	if !reflect.DeepEqual(runner.args, expectedArgs) {
 		t.Fatalf("expected args %#v, got %#v", expectedArgs, runner.args)
 	}

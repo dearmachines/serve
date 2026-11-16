@@ -9,7 +9,7 @@ Prebuilt releases are available for Linux AMD64. Install the binary on the compu
 ```sh
 curl -fLO https://github.com/dearmachines/serve/releases/latest/download/serve-linux-amd64
 curl -fLO https://github.com/dearmachines/serve/releases/latest/download/SHA256SUMS
-sha256sum --check SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
 sudo install -m 0755 serve-linux-amd64 /usr/local/bin/serve
 serve version
 ```
@@ -30,8 +30,9 @@ Each deployment host needs:
 Install and start the agent once on each host:
 
 ```sh
-curl -fL https://raw.githubusercontent.com/dearmachines/serve/main/packaging/systemd/serve-agent.service \
-  -o serve-agent.service
+curl -fLO https://github.com/dearmachines/serve/releases/latest/download/serve-agent.service
+curl -fLO https://github.com/dearmachines/serve/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
 sudo install -m 0644 serve-agent.service /etc/systemd/system/serve-agent.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now serve-agent
