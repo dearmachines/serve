@@ -7,6 +7,7 @@ require (
 	github.com/docker/cli v29.9.3+incompatible
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/docker/go-connections v0.8.2
+	github.com/docker/go-units v0.5.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -19,7 +20,6 @@ require (
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/creack/pty v1.1.24 // indirect
 	github.com/docker/docker-credential-helpers v0.9.13 // indirect
-	github.com/docker/go-units v0.5.0
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

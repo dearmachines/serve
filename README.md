@@ -120,7 +120,7 @@ sudo serve status
 
 Here `--host` selects the exact host identity in the manifest; it does not initiate SSH. It defaults to `localhost`. The agent owns Docker/registry/SOPS credentials and deployment state. `--state-dir` belongs only on `serve agent run`, not deploy, apply, or rollback. Socket access is root-equivalent and may require `sudo`.
 
-For development, start `serve agent run --socket /tmp/serve-dev.sock --state-dir .serve/state`, then use `--socket /tmp/serve-dev.sock` on local commands. Run only one agent for a given set of Docker workloads. See [local migration and command semantics](docs/getting-started.md#agent-ownership-and-local-operation).
+For development, start `serve agent run --socket .serve/agent.sock --state-dir .serve/state`, then use `--socket .serve/agent.sock` on local commands. Run only one agent for a given set of Docker workloads. See [local migration and command semantics](docs/getting-started.md#agent-ownership-and-local-operation).
 
 ## Operate the application
 

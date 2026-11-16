@@ -1600,3 +1600,48 @@ func (r *recordingRunner) Run(ctx context.Context, name string, args ...string) 
 	r.args = append([]string(nil), args...)
 	return r.err
 }
+
+func TestWorkloadOutputIsSanitizedOnTerminals(t *testing.T) {
+	hostile := "listing\x1b]52;c;ZXZpbA==\a\x1b[2J\n"
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{"exec", []string{"exec", "--host", "app1.example.com", "--container", "c", "--", "ls"}},
+		{"logs", []string{"logs", "--host", "app1.example.com", "--container", "c"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ssh := &recordingSSHRunner{outputFunc: func(string, string) string { return hostile }}
+			terminal := cli.WithTerminalDetector(func(io.Writer) bool { return true })
+
+			var sanitized bytes.Buffer
+			if code := cli.New("test", cli.WithSSHRunner(ssh), terminal).Run(context.Background(), test.args, &sanitized, io.Discard); code != 0 {
+				t.Fatalf("exit code %d", code)
+			}
+			if strings.ContainsAny(sanitized.String(), "\x1b\a") || !strings.Contains(sanitized.String(), "listing") {
+				t.Fatalf("terminal output = %q, want escape sequences neutralized", sanitized.String())
+			}
+
+			raw := append(append([]string(nil), test.args[:1]...), append([]string{"--raw"}, test.args[1:]...)...)
+			var exact bytes.Buffer
+			if code := cli.New("test", cli.WithSSHRunner(ssh), terminal).Run(context.Background(), raw, &exact, io.Discard); code != 0 {
+				t.Fatalf("--raw exit code %d", code)
+			}
+			if exact.String() != hostile {
+				t.Fatalf("--raw output = %q, want byte-exact %q", exact.String(), hostile)
+			}
+		})
+	}
+}
+
+func TestWorkloadOutputIsByteExactWhenNotATerminal(t *testing.T) {
+	hostile := "data\x1b[2J\n"
+	ssh := &recordingSSHRunner{outputFunc: func(string, string) string { return hostile }}
+	var stdout bytes.Buffer
+	if code := cli.New("test", cli.WithSSHRunner(ssh)).Run(context.Background(), []string{"exec", "--host", "app1.example.com", "--container", "c", "--", "cat"}, &stdout, io.Discard); code != 0 {
+		t.Fatalf("exit code %d", code)
+	}
+	if stdout.String() != hostile {
+		t.Fatalf("piped output = %q, want byte-exact", stdout.String())
+	}
+}
