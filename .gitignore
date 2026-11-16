@@ -9,6 +9,10 @@ coverage.*
 # Local Serve state and secrets
 /.serve/
 serve.secrets.yml
+.env
+.env.*
+*.pem
+*.key
 
 # Editor and operating system files
 .DS_Store

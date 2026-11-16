@@ -1020,3 +1020,71 @@ func writeFile(t *testing.T, path string, contents string) {
 		t.Fatalf("write test file: %v", err)
 	}
 }
+
+func TestLoadAcceptsWorkloadResources(t *testing.T) {
+	cfg, err := config.Load(writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  web:
+    resources:
+      memory: 512m
+      cpus: 0.5
+      pids: 256
+dependencies:
+  db:
+    image: postgres
+    resources:
+      memory: 1g
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Servers["web"].Resources; got.Memory != "512m" || got.CPUs != "0.5" || got.Pids != 256 {
+		t.Fatalf("web resources = %#v", got)
+	}
+	if got := cfg.Dependencies["db"].Resources.Memory; got != "1g" {
+		t.Fatalf("db memory = %q", got)
+	}
+}
+
+func TestLoadRejectsInvalidWorkloadResources(t *testing.T) {
+	for _, test := range []struct{ name, resources, want string }{
+		{"memory", "memory: lots", "servers.web.resources.memory"},
+		{"cpus", "cpus: -1", "servers.web.resources.cpus"},
+		{"pids", "pids: -1", "servers.web.resources.pids"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := config.Load(writeConfig(t, "serve.yml", "service: app\nimage: app\nservers:\n  web:\n    resources:\n      "+test.resources+"\n"))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsAmbiguousProxySSL(t *testing.T) {
+	for _, value := range []string{"yes", "on", "enabled"} {
+		_, err := config.Load(writeConfig(t, "serve.yml", "service: app\nimage: app\nproxy:\n  hosts: [app.example.com]\n  ssl: "+value+"\n"))
+		if err == nil || !strings.Contains(err.Error(), "proxy.ssl") {
+			t.Fatalf("ssl %q: Load error = %v, want proxy.ssl error instead of silently serving HTTP", value, err)
+		}
+	}
+	for _, value := range []string{"auto", "true", "false"} {
+		if _, err := config.Load(writeConfig(t, "serve.yml", "service: app\nimage: app\nproxy:\n  hosts: [app.example.com]\n  ssl: "+value+"\n")); err != nil {
+			t.Fatalf("ssl %q rejected: %v", value, err)
+		}
+	}
+}
+
+func TestLoadRejectsInvalidProxyHosts(t *testing.T) {
+	for _, host := range []string{`"a.example.com,b.example.com"`, `"bad host"`, `"-leading.example.com"`, `""`} {
+		_, err := config.Load(writeConfig(t, "serve.yml", "service: app\nimage: app\nproxy:\n  hosts: ["+host+"]\n"))
+		if err == nil || !strings.Contains(err.Error(), "proxy.hosts") {
+			t.Fatalf("host %s: Load error = %v, want proxy.hosts error", host, err)
+		}
+	}
+	if _, err := config.Load(writeConfig(t, "serve.yml", "service: app\nimage: app\nproxy:\n  hosts: [api.example.com, \"*.example.com\", localhost]\n")); err != nil {
+		t.Fatalf("valid hosts rejected: %v", err)
+	}
+}

@@ -9,7 +9,7 @@ Prebuilt releases are available for Linux AMD64. Install the binary on the compu
 ```sh
 curl -fLO https://github.com/dearmachines/serve/releases/latest/download/serve-linux-amd64
 curl -fLO https://github.com/dearmachines/serve/releases/latest/download/SHA256SUMS
-sha256sum --check SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
 sudo install -m 0755 serve-linux-amd64 /usr/local/bin/serve
 serve version
 ```
@@ -30,8 +30,9 @@ Each deployment host needs:
 Install and start the agent once on each host:
 
 ```sh
-curl -fL https://raw.githubusercontent.com/dearmachines/serve/main/packaging/systemd/serve-agent.service \
-  -o serve-agent.service
+curl -fLO https://github.com/dearmachines/serve/releases/latest/download/serve-agent.service
+curl -fLO https://github.com/dearmachines/serve/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
 sudo install -m 0644 serve-agent.service /etc/systemd/system/serve-agent.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now serve-agent
@@ -103,6 +104,10 @@ If `image` has no tag, Serve appends the value passed to `--version`. The exampl
 
 Serve starts the new containers, waits for their health checks, switches proxy traffic, and then retires the previous containers according to `retain_containers`.
 
+A health probe without `timeout` gives up after 5 seconds. Probes do not follow redirects; any 2xx or 3xx response counts as healthy.
+
+When the agent restarts a crashed container and `restart.initial_backoff` is not set, the first restart is immediate and later restarts wait 1s, 2s, 4s, and so on. The wait is capped at `restart.max_backoff`, or 1 minute when that is not set. The attempt counter resets after a quiet period of `restart.window`, or 10 minutes when that is not set. Each service heals independently, so one crash-looping service does not delay healing of the others.
+
 ## Local operation uses the agent too
 
 The CLI never calls Docker directly. Deployment, status, logs, events, exec, doctor, rollback, remove, and prune all use the host agent API. Remote commands reach it through SSH; local commands use `/run/serve/agent.sock` (override with `--socket PATH`). If the agent is unavailable, commands fail—there is no standalone fallback.
@@ -116,7 +121,7 @@ sudo serve status
 
 Here `--host` selects the exact host identity in the manifest; it does not initiate SSH. It defaults to `localhost`. The agent owns Docker/registry/SOPS credentials and deployment state. `--state-dir` belongs only on `serve agent run`, not deploy, apply, or rollback. Socket access is root-equivalent and may require `sudo`.
 
-For development, start `serve agent run --socket /tmp/serve-dev.sock --state-dir .serve/state`, then use `--socket /tmp/serve-dev.sock` on local commands. Run only one agent for a given set of Docker workloads. See [local migration and command semantics](docs/getting-started.md#agent-ownership-and-local-operation).
+For development, start `serve agent run --socket .serve/agent.sock --state-dir .serve/state`, then use `--socket .serve/agent.sock` on local commands. Run only one agent for a given set of Docker workloads. See [local migration and command semantics](docs/getting-started.md#agent-ownership-and-local-operation).
 
 ## Operate the application
 
@@ -246,6 +251,34 @@ Each entry uses `source:/absolute/container/path` with an optional `:ro` or `:rw
 Named volumes are local to each Docker host and survive container replacement, `serve remove`, `serve prune`, and rollback. Serve does not delete volume data, and rollback restores container configuration rather than previous volume contents. Use service-qualified volume names to avoid accidental sharing between configurations on the same host.
 
 Replicas and blue-green versions that use the same named volume access the same data concurrently. In particular, versioned dependencies can briefly overlap during deployment, so a volume mount alone does not provide a safe zero-downtime database lifecycle.
+
+Volume names starting with `serve-` are reserved for Serve's own data, such as `serve-proxy-data`, and are rejected.
+
+## Resource limits
+
+Workloads share their host, so cap what one container can take. `resources` works on application roles and dependencies:
+
+```yaml
+servers:
+  web:
+    resources:
+      memory: 512m
+      cpus: 0.5
+      pids: 256
+
+dependencies:
+  postgres:
+    resources:
+      memory: 1g
+```
+
+Fields you leave out are unlimited, except `pids`, which defaults to 4096. Changing `resources` recreates the affected containers on the next deploy.
+
+Every workload container also gets these settings, whatever its configuration:
+
+- Logs use the `json-file` driver, rotated at 10 MB with 3 files kept. This overrides the host's default log driver.
+- Processes cannot gain privileges through setuid binaries (`no-new-privileges`).
+- The `NET_RAW` capability is dropped, so raw sockets and tools such as `ping` don't work inside containers.
 
 ## Private images
 

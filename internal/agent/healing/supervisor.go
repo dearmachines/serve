@@ -11,6 +11,17 @@ import (
 	"github.com/uptimenine/serve/internal/runtime"
 )
 
+// Defaults applied when a restart policy leaves the field unset, so a
+// crash-looping workload cannot drive an unbounded pull/decrypt/recreate
+// loop.
+const (
+	DefaultInitialBackoff = time.Second
+	DefaultMaxBackoff     = time.Minute
+	// DefaultRestartWindow is the quiet period after which the attempt
+	// counter (and therefore the backoff) resets when no window is set.
+	DefaultRestartWindow = 10 * time.Minute
+)
+
 type Supervisor struct {
 	runtime      runtime.Runtime
 	reconciler   *reconciler.Reconciler
@@ -147,7 +158,7 @@ func (s *Supervisor) HandleRuntimeEvent(ctx context.Context, event runtime.Runti
 		return Result{MarkedUnhealthy: true}, nil
 	}
 
-	if err := s.removeProxyTarget(ctx, desired.Service, container); err != nil {
+	if err := s.removeProxyTarget(ctx, desired.Service, desired.Destination, container); err != nil {
 		return Result{}, err
 	}
 	if err := s.sleepBackoff(ctx, container.Restart, attempt); err != nil {
@@ -200,12 +211,13 @@ func shouldRestart(restart planner.Restart, event runtime.RuntimeEvent) bool {
 	}
 }
 
-func (s *Supervisor) removeProxyTarget(ctx context.Context, service string, container planner.Container) error {
+func (s *Supervisor) removeProxyTarget(ctx context.Context, service string, destination string, container planner.Container) error {
 	if !container.Proxy || s.proxyManager == nil {
 		return nil
 	}
 	return s.proxyManager.RemoveTarget(ctx, proxy.Target{
 		Service:       service,
+		Destination:   destination,
 		Role:          container.Role,
 		ContainerName: container.Name,
 		Port:          targetPort(container),
@@ -225,39 +237,48 @@ func (s *Supervisor) sleepBackoff(ctx context.Context, restart planner.Restart, 
 }
 
 func windowDuration(restart planner.Restart) (time.Duration, error) {
-	if restart.Window == "" {
-		return 0, nil
-	}
-	window, err := time.ParseDuration(restart.Window)
-	if err != nil {
-		return 0, fmt.Errorf("parse restart window %q: %w", restart.Window, err)
-	}
-	return window, nil
+	return durationOrDefault("restart window", restart.Window, DefaultRestartWindow)
 }
 
+// backoffDuration doubles from the initial backoff and is always capped, so
+// it can neither be skipped by omission nor overflow on long restart loops.
+// Without a configured initial_backoff the first restart is immediate (a
+// one-off crash heals fast) and repeats back off from DefaultInitialBackoff.
+// An explicit initial_backoff of 0 still disables the delay.
 func backoffDuration(restart planner.Restart, attempt int) (time.Duration, error) {
 	if restart.InitialBackoff == "" {
+		if attempt <= 1 {
+			return 0, nil
+		}
+		attempt--
+	}
+	initial, err := durationOrDefault("initial backoff", restart.InitialBackoff, DefaultInitialBackoff)
+	if err != nil {
+		return 0, err
+	}
+	maxBackoff, err := durationOrDefault("max backoff", restart.MaxBackoff, DefaultMaxBackoff)
+	if err != nil {
+		return 0, err
+	}
+	if initial <= 0 {
 		return 0, nil
 	}
-	initial, err := time.ParseDuration(restart.InitialBackoff)
-	if err != nil {
-		return 0, fmt.Errorf("parse initial backoff %q: %w", restart.InitialBackoff, err)
-	}
 	backoff := initial
-	for i := 1; i < attempt; i++ {
+	for i := 1; i < attempt && backoff < maxBackoff; i++ {
 		backoff *= 2
 	}
-	if restart.MaxBackoff == "" {
-		return backoff, nil
+	return min(backoff, maxBackoff), nil
+}
+
+func durationOrDefault(name string, value string, fallback time.Duration) (time.Duration, error) {
+	if value == "" {
+		return fallback, nil
 	}
-	maxBackoff, err := time.ParseDuration(restart.MaxBackoff)
+	parsed, err := time.ParseDuration(value)
 	if err != nil {
-		return 0, fmt.Errorf("parse max backoff %q: %w", restart.MaxBackoff, err)
+		return 0, fmt.Errorf("parse %s %q: %w", name, value, err)
 	}
-	if backoff > maxBackoff {
-		return maxBackoff, nil
-	}
-	return backoff, nil
+	return parsed, nil
 }
 
 func (s *Supervisor) emit(ctx context.Context, name string, desired planner.DesiredState, container planner.Container, event runtime.RuntimeEvent, attempt int, oomKilled bool) error {

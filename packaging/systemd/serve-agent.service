@@ -9,9 +9,13 @@ ExecStart=/usr/local/bin/serve agent run --state-dir /var/lib/serve/state --sock
 Restart=always
 RestartSec=3
 RuntimeDirectory=serve
+RuntimeDirectoryMode=0755
 StateDirectory=serve
+StateDirectoryMode=0700
 UMask=0077
 Environment=HOME=/root
+MemoryMax=1G
+TasksMax=512
 
 NoNewPrivileges=true
 ProtectSystem=strict

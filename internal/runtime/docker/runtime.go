@@ -76,6 +76,10 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec runtime.ContainerSpe
 		Env:          env,
 		ExposedPorts: exposedPorts(spec.Ports),
 	}
+	pidsLimit := spec.Resources.PidsLimit
+	if pidsLimit <= 0 {
+		pidsLimit = DefaultPidsLimit
+	}
 	hostConfig := &container.HostConfig{
 		Mounts:       mounts,
 		PortBindings: portBindings(spec.Ports),
@@ -83,6 +87,17 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec runtime.ContainerSpe
 			Name:              container.RestartPolicyMode(spec.Restart.Policy),
 			MaximumRetryCount: spec.Restart.MaxAttempts,
 		},
+		Resources: container.Resources{
+			Memory:    spec.Resources.MemoryBytes,
+			NanoCPUs:  spec.Resources.NanoCPUs,
+			PidsLimit: &pidsLimit,
+		},
+		// Rotated logs keep one chatty workload from filling the host disk.
+		LogConfig: container.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "10m", "max-file": "3"}},
+		// Workloads share the serve bridge; deny setuid escalation and raw
+		// sockets (ARP/packet spoofing against neighbours).
+		SecurityOpt: []string{"no-new-privileges"},
+		CapDrop:     []string{"NET_RAW"},
 	}
 	networkingConfig := &network.NetworkingConfig{}
 	if spec.Network != "" {
@@ -215,6 +230,13 @@ func (r *Runtime) Events(ctx context.Context) (<-chan runtime.RuntimeEvent, erro
 	return out, nil
 }
 
+// DefaultPidsLimit bounds processes per container when none is configured,
+// so a fork bomb in one workload cannot exhaust the host's PID space.
+const DefaultPidsLimit = 4096
+
+// MaxExecOutputBytes caps how much exec output the agent buffers in memory.
+const MaxExecOutputBytes = 10 << 20
+
 func (r *Runtime) ExecContainer(ctx context.Context, id runtime.ContainerID, cmd []string) (string, error) {
 	exec, err := r.client.ContainerExecCreate(ctx, string(id), container.ExecOptions{
 		Cmd:          cmd,
@@ -231,9 +253,20 @@ func (r *Runtime) ExecContainer(ctx context.Context, id runtime.ContainerID, cmd
 	}
 	defer attach.Close()
 
-	var output strings.Builder
-	if _, err := stdcopy.StdCopy(&output, &output, attach.Reader); err != nil {
+	// The attach stream is controlled by the workload and does not observe
+	// ctx on its own; close it on cancellation so the read below returns.
+	stop := context.AfterFunc(ctx, attach.Close)
+	defer stop()
+
+	output := &cappedBuffer{limit: MaxExecOutputBytes}
+	if _, err := stdcopy.StdCopy(output, output, attach.Reader); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return output.String(), fmt.Errorf("exec: %w", ctxErr)
+		}
 		return output.String(), err
+	}
+	if output.truncated {
+		return output.String(), fmt.Errorf("exec output truncated at %d bytes", MaxExecOutputBytes)
 	}
 
 	inspect, err := r.client.ContainerExecInspect(ctx, exec.ID)
@@ -244,6 +277,25 @@ func (r *Runtime) ExecContainer(ctx context.Context, id runtime.ContainerID, cmd
 		return output.String(), &runtime.ExecExitError{Command: append([]string(nil), cmd...), Code: inspect.ExitCode, Output: output.String()}
 	}
 	return output.String(), nil
+}
+
+// cappedBuffer keeps at most limit bytes and silently discards the rest so
+// the stream is still drained to completion.
+type cappedBuffer struct {
+	strings.Builder
+	limit     int
+	truncated bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - b.Len(); room < len(p) {
+		b.truncated = true
+		if room > 0 {
+			b.Builder.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	return b.Builder.Write(p)
 }
 
 func (r *Runtime) CreateNetwork(ctx context.Context, spec runtime.NetworkSpec) error {

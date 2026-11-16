@@ -38,10 +38,10 @@ go run ./cmd/serve --help
 All operational CLI commands use the agent socket, never Docker directly. Start a development agent in its own terminal:
 
 ```sh
-serve agent run --socket /tmp/serve-dev.sock --state-dir .serve/state
+serve agent run --socket .serve/agent.sock --state-dir .serve/state
 ```
 
-Then use `serve deploy --local --socket /tmp/serve-dev.sock` and `serve status --socket /tmp/serve-dev.sock`. There is no daemonless mode. Do not point a development agent at Docker workloads already managed by another agent.
+Then use `serve deploy --local --socket .serve/agent.sock` and `serve status --socket .serve/agent.sock`. There is no daemonless mode. Do not point a development agent at Docker workloads already managed by another agent.
 
 ## Test
 

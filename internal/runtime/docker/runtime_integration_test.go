@@ -317,6 +317,62 @@ func TestDockerExecDistinguishesProcessExitFromTransportFailure(t *testing.T) {
 	}
 }
 
+func startExecTestContainer(t *testing.T, ctx context.Context, rt *dockerruntime.Runtime, suffix string) runtime.ContainerID {
+	t.Helper()
+	if err := rt.PullImage(ctx, testImage); err != nil {
+		t.Fatal(err)
+	}
+	id, err := rt.CreateContainer(ctx, runtime.ContainerSpec{Name: testContainerName(t, suffix), Image: testImage, Command: []string{"sleep", "120"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeContainer(t, rt, id) })
+	if err := rt.StartContainer(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestDockerExecStopsWhenContextIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rt := newDockerRuntime(t)
+	id := startExecTestContainer(t, ctx, rt, "exec-cancel")
+
+	execCtx, execCancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer execCancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := rt.ExecContainer(execCtx, id, []string{"sh", "-c", "sleep 100 & wait"})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled exec reported success")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("exec kept running after its context was cancelled")
+	}
+}
+
+func TestDockerExecCapsOutput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rt := newDockerRuntime(t)
+	id := startExecTestContainer(t, ctx, rt, "exec-cap")
+
+	output, err := rt.ExecContainer(ctx, id, []string{"sh", "-c", fmt.Sprintf("head -c %d /dev/zero", dockerruntime.MaxExecOutputBytes+1<<20)})
+
+	if len(output) > dockerruntime.MaxExecOutputBytes {
+		t.Fatalf("exec output = %d bytes, want at most %d", len(output), dockerruntime.MaxExecOutputBytes)
+	}
+	if err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("expected truncation error, got %v", err)
+	}
+}
+
 func TestDockerRuntimePublishesHostPorts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

@@ -1,6 +1,7 @@
 package state_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -165,5 +166,81 @@ func desiredState(version string) planner.DesiredState {
 				},
 			},
 		},
+	}
+}
+
+func TestDottedIdentitiesDoNotShareState(t *testing.T) {
+	store := agentstate.NewStore(t.TempDir())
+	first := desiredState("v1")
+	first.Service, first.Destination = "shop.api", "prod"
+	second := desiredState("v2")
+	second.Service, second.Destination = "shop", "api.prod"
+
+	for _, desired := range []planner.DesiredState{first, second} {
+		if err := store.SaveDesired(desired); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	loaded, err := store.LoadDesired("shop.api", "prod")
+	if err != nil || loaded.Version != "v1" {
+		t.Fatalf("shop.api/prod = %q %v, want v1 (state overwritten by shop/api.prod)", loaded.Version, err)
+	}
+	states, err := store.ListDesired()
+	if err != nil || len(states) != 2 {
+		t.Fatalf("ListDesired = %d states %v, want 2", len(states), err)
+	}
+}
+
+func TestLegacyStateFilesAreMigratedUsingTheirRecordedIdentity(t *testing.T) {
+	dir := t.TempDir()
+	legacy := desiredState("old")
+	legacy.Service, legacy.Destination = "shop", "api.prod"
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shop.api.prod.desired.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	actual, _ := json.Marshal(agentstate.ActualState{Service: "shop", Destination: "api.prod", Containers: []agentstate.ActualContainer{{Name: "c"}}})
+	if err := os.WriteFile(filepath.Join(dir, "shop.api.prod.actual.json"), actual, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := agentstate.NewStore(dir)
+
+	states, err := store.ListDesired()
+	if err != nil || len(states) != 1 || states[0].Service != "shop" || states[0].Destination != "api.prod" {
+		t.Fatalf("migrated ListDesired = %#v %v", states, err)
+	}
+	loadedActual, err := store.LoadActual("shop", "api.prod")
+	if err != nil || len(loadedActual.Containers) != 1 {
+		t.Fatalf("migrated actual = %#v %v", loadedActual, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "shop.api.prod.desired.json")); !os.IsNotExist(err) {
+		t.Fatalf("legacy file left behind: %v", err)
+	}
+}
+
+func TestListDesiredSkipsCorruptFileButReturnsTheRest(t *testing.T) {
+	store := agentstate.NewStore(t.TempDir())
+	if err := store.SaveDesired(desiredState("v1")); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := store.Path("broken", "production", "desired")
+	if err := os.MkdirAll(filepath.Dir(corrupt), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(corrupt, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	states, err := store.ListDesired()
+
+	if err == nil {
+		t.Fatal("corrupt desired state was not reported")
+	}
+	if len(states) != 1 || states[0].Service != "my-app" {
+		t.Fatalf("one corrupt file blocked every other service: %#v", states)
 	}
 }

@@ -60,7 +60,16 @@ type Container struct {
 	Restart          Restart           `json:"restart,omitempty"`
 	Aliases          []string          `json:"aliases,omitempty"`
 	Volumes          []string          `json:"volumes,omitempty"`
+	Resources        Resources         `json:"resources,omitzero"`
 	Labels           map[string]string `json:"labels"`
+}
+
+// Resources are per-container limits; zero fields are unlimited. omitzero
+// keeps unlimited containers' spec hashes unchanged from older versions.
+type Resources struct {
+	MemoryBytes int64 `json:"memory_bytes,omitempty"`
+	NanoCPUs    int64 `json:"nano_cpus,omitempty"`
+	PidsLimit   int64 `json:"pids_limit,omitempty"`
 }
 
 type Port struct {
@@ -167,6 +176,7 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 				Restart:       restart(server.Restart),
 				Aliases:       append([]string(nil), server.Aliases...),
 				Volumes:       append([]string(nil), server.Volumes...),
+				Resources:     resources(server.Resources),
 				Labels:        labels(cfg.Service, destination, role, opts.Version, replica, "app"),
 			}
 			if server.AppPort > 0 {
@@ -198,6 +208,7 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 			Restart:       restart(dependency.Restart),
 			Aliases:       append([]string(nil), dependency.Aliases...),
 			Volumes:       append([]string(nil), dependency.Volumes...),
+			Resources:     resources(dependency.Resources),
 			Env:           copyStringMap(dependency.Env.Plain),
 			Labels:        labels(cfg.Service, destination, name, opts.Version, 1, "accessory"),
 		}
@@ -406,6 +417,14 @@ func healthcheck(source config.HealthcheckConfig) *Healthcheck {
 		check.Port = source.HTTP.Port
 	}
 	return check
+}
+
+// resources converts validated config limits; config.Load has already
+// rejected unparsable values.
+func resources(source config.ResourcesConfig) Resources {
+	memory, _ := source.MemoryBytes()
+	cpus, _ := source.NanoCPUs()
+	return Resources{MemoryBytes: memory, NanoCPUs: cpus, PidsLimit: int64(source.Pids)}
 }
 
 func restart(source config.RestartConfig) Restart {

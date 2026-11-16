@@ -312,6 +312,35 @@ func TestAliasActivationRejectsAnotherServiceOwner(t *testing.T) {
 	}
 }
 
+func TestAliasActivationRejectsStoppedOwnerOfAnotherService(t *testing.T) {
+	env := newEnv(t)
+	// A crashed container still holds its alias and will get it back when healed.
+	if _, err := env.rt.CreateContainer(context.Background(), runtime.ContainerSpec{
+		Name:    "other-api-production-v1-r1",
+		Image:   "other:v1",
+		Network: "serve",
+		Aliases: []string{"api"},
+		Labels: map[string]string{
+			"serve.managed":     "true",
+			"serve.service":     "other",
+			"serve.destination": "production",
+			"serve.role":        "web",
+			"serve.version":     "v1",
+		},
+	}); err != nil {
+		t.Fatalf("create stopped foreign container: %v", err)
+	}
+
+	desired := desiredState("abc123", 1, false)
+	desired.Containers[0].Aliases = []string{"api"}
+	env.checker.SetStatus(desired.Containers[0].Name, health.Healthy)
+
+	err := env.engine.Apply(context.Background(), desired)
+	if err == nil || !strings.Contains(err.Error(), `network alias "api" is already owned by other/web`) {
+		t.Fatalf("Apply error = %v, want stopped owner to keep its alias", err)
+	}
+}
+
 func TestUnhealthyAliasedDependentKeepsOldVersionServing(t *testing.T) {
 	env := newEnv(t)
 	current := desiredState("abc123", 1, true)
@@ -633,6 +662,37 @@ func TestCandidateBecomesHealthyAfterPolling(t *testing.T) {
 	}
 	if targets := env.proxy.Targets(); len(targets) != 1 {
 		t.Fatalf("expected candidate to be routed once healthy, targets: %+v", targets)
+	}
+}
+
+type anyDeadlineChecker struct {
+	sawNoDeadline bool
+}
+
+func (c *anyDeadlineChecker) Check(ctx context.Context, target health.Target) (health.Status, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		c.sawNoDeadline = true
+	}
+	return health.Healthy, nil
+}
+
+func TestHealthProbeWithoutConfiguredTimeoutStillHasDeadline(t *testing.T) {
+	env := newEnv(t)
+	checker := &anyDeadlineChecker{}
+	engine := cutover.New(cutover.Deps{
+		Runtime:  env.rt,
+		Starter:  reconciler.New(env.rt),
+		Health:   checker,
+		Proxy:    env.proxy,
+		LastGood: env.store,
+		Sleeper:  noopSleeper{},
+	})
+
+	if err := engine.Apply(context.Background(), desiredState("abc123", 1, false)); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if checker.sawNoDeadline {
+		t.Fatal("health probe ran without a deadline; a hanging workload could hold the agent locks forever")
 	}
 }
 

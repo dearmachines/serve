@@ -16,6 +16,7 @@ import (
 func webTarget() proxy.Target {
 	return proxy.Target{
 		Service:       "my-app",
+		Destination:   "production",
 		Role:          "web",
 		ContainerName: "my-app-web-production-abc123-r1",
 		Port:          3000,
@@ -96,28 +97,9 @@ func TestAddTargetIssuesKamalProxyDeploy(t *testing.T) {
 	}
 
 	exec := findExec(t, rt, "kamal-proxy deploy")
-	want := "exec_container:serve-proxy:kamal-proxy deploy my-app-web --target=my-app-web-production-abc123-r1:3000 --health-check-path=/up --deploy-timeout=30s --drain-timeout=30s"
+	want := "exec_container:serve-proxy:kamal-proxy deploy my-app/production/web --target=my-app-web-production-abc123-r1:3000 --health-check-path=/up --deploy-timeout=30s --drain-timeout=30s"
 	if exec != want {
 		t.Fatalf("deploy exec\n got: %s\nwant: %s", exec, want)
-	}
-}
-
-func TestRemoveTargetIssuesKamalProxyRemove(t *testing.T) {
-	rt := fakeruntime.NewRuntime()
-	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
-
-	target := webTarget()
-	if err := manager.AddTarget(context.Background(), target); err != nil {
-		t.Fatalf("AddTarget: %v", err)
-	}
-	if err := manager.RemoveTarget(context.Background(), target); err != nil {
-		t.Fatalf("RemoveTarget: %v", err)
-	}
-
-	exec := findExec(t, rt, "kamal-proxy remove")
-	want := "exec_container:serve-proxy:kamal-proxy remove my-app-web"
-	if exec != want {
-		t.Fatalf("remove exec\n got: %s\nwant: %s", exec, want)
 	}
 }
 
@@ -148,11 +130,10 @@ func TestUnchangedTargetSetSkipsProxyCalls(t *testing.T) {
 		t.Fatalf("expected 1 deploy exec for unchanged target, got %d: %v", got, rt.Operations())
 	}
 
-	if err := manager.RemoveTarget(context.Background(), target); err != nil {
-		t.Fatalf("RemoveTarget: %v", err)
-	}
-	if err := manager.RemoveTarget(context.Background(), target); err != nil {
-		t.Fatalf("RemoveTarget (repeat): %v", err)
+	for range 2 {
+		if err := manager.SetTargets(context.Background(), "my-app", "production", "web", nil, proxy.RouteOptions{}); err != nil {
+			t.Fatalf("SetTargets empty: %v", err)
+		}
 	}
 	if got := countExecs(rt, "kamal-proxy remove"); got != 1 {
 		t.Fatalf("expected 1 remove exec for unchanged target, got %d: %v", got, rt.Operations())
@@ -163,7 +144,7 @@ func TestUnchangedTargetSetRestartsDeadProxyAndRestoresRoute(t *testing.T) {
 	rt := fakeruntime.NewRuntime()
 	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
 	target := webTarget()
-	if err := manager.SetTargets(context.Background(), "my-app", "web", []proxy.Target{target}, proxy.RouteOptions{}); err != nil {
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{target}, proxy.RouteOptions{}); err != nil {
 		t.Fatalf("SetTargets initial: %v", err)
 	}
 	states, err := rt.ListContainers(context.Background(), runtime.ContainerFilters{Labels: map[string]string{"serve.container_type": "proxy"}})
@@ -173,7 +154,7 @@ func TestUnchangedTargetSetRestartsDeadProxyAndRestoresRoute(t *testing.T) {
 	rt.Die(states[0].ID, 1, false)
 	rt.ClearOperations()
 
-	if err := manager.SetTargets(context.Background(), "my-app", "web", []proxy.Target{target}, proxy.RouteOptions{}); err != nil {
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{target}, proxy.RouteOptions{}); err != nil {
 		t.Fatalf("SetTargets after proxy death: %v", err)
 	}
 
@@ -272,7 +253,7 @@ func TestSetTargetsReplacesTargetSetAtomically(t *testing.T) {
 	new2.ContainerName = "my-app-web-production-def456-r2"
 
 	before := countExecs(rt, "kamal-proxy deploy")
-	if err := manager.SetTargets(context.Background(), "my-app", "web", []proxy.Target{new1, new2}, proxy.RouteOptions{}); err != nil {
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{new1, new2}, proxy.RouteOptions{}); err != nil {
 		t.Fatalf("SetTargets: %v", err)
 	}
 	if got := countExecs(rt, "kamal-proxy deploy"); got != before+1 {
@@ -290,7 +271,7 @@ func TestSetTargetsReplacesTargetSetAtomically(t *testing.T) {
 	}
 
 	// Unchanged set is a no-op.
-	if err := manager.SetTargets(context.Background(), "my-app", "web", []proxy.Target{new2, new1}, proxy.RouteOptions{}); err != nil {
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{new2, new1}, proxy.RouteOptions{}); err != nil {
 		t.Fatalf("SetTargets (repeat): %v", err)
 	}
 	if got := countExecs(rt, "kamal-proxy deploy"); got != before+1 {
@@ -308,7 +289,7 @@ func TestSetTargetsPassesHostnamesTLSAndTimeouts(t *testing.T) {
 		DeployTimeout: 45 * time.Second,
 		DrainTimeout:  60 * time.Second,
 	}
-	if err := manager.SetTargets(context.Background(), "my-app", "web", []proxy.Target{webTarget()}, opts); err != nil {
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{webTarget()}, opts); err != nil {
 		t.Fatalf("SetTargets: %v", err)
 	}
 
@@ -334,10 +315,10 @@ func TestSetTargetsRedeploysWhenOnlyRouteOptionsChange(t *testing.T) {
 	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
 	targets := []proxy.Target{webTarget()}
 
-	if err := manager.SetTargets(context.Background(), "my-app", "web", targets, proxy.RouteOptions{}); err != nil {
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", targets, proxy.RouteOptions{}); err != nil {
 		t.Fatalf("SetTargets initial: %v", err)
 	}
-	if err := manager.SetTargets(context.Background(), "my-app", "web", targets, proxy.RouteOptions{
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", targets, proxy.RouteOptions{
 		Hosts: []string{"app.example.com"}, TLS: true,
 	}); err != nil {
 		t.Fatalf("SetTargets changed route: %v", err)
@@ -357,11 +338,11 @@ func TestSetTargetsRedeploysWhenOnlyHealthPathChanges(t *testing.T) {
 	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
 	target := webTarget()
 
-	if err := manager.SetTargets(context.Background(), "my-app", "web", []proxy.Target{target}, proxy.RouteOptions{}); err != nil {
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{target}, proxy.RouteOptions{}); err != nil {
 		t.Fatalf("SetTargets initial: %v", err)
 	}
 	target.HealthPath = "/ready"
-	if err := manager.SetTargets(context.Background(), "my-app", "web", []proxy.Target{target}, proxy.RouteOptions{}); err != nil {
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{target}, proxy.RouteOptions{}); err != nil {
 		t.Fatalf("SetTargets changed health path: %v", err)
 	}
 
@@ -381,7 +362,7 @@ func TestHealingRedeployKeepsRouteOptions(t *testing.T) {
 	replica2 := webTarget()
 	replica2.ContainerName = "my-app-web-production-abc123-r2"
 	opts := proxy.RouteOptions{Hosts: []string{"app.example.com"}, TLS: true}
-	if err := manager.SetTargets(context.Background(), "my-app", "web", []proxy.Target{replica1, replica2}, opts); err != nil {
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{replica1, replica2}, opts); err != nil {
 		t.Fatalf("SetTargets: %v", err)
 	}
 
@@ -406,7 +387,7 @@ func TestEmptyTargetsAreIdempotentWhenActualProxyServiceIsAbsent(t *testing.T) {
 	rt.SetExecResult("serve-proxy", output, &runtime.ExecExitError{Code: 1, Output: output})
 	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
 	for i := 0; i < 2; i++ {
-		if err := manager.SetTargets(context.Background(), "my-app", "web", nil, proxy.RouteOptions{}); err != nil {
+		if err := manager.SetTargets(context.Background(), "my-app", "production", "web", nil, proxy.RouteOptions{}); err != nil {
 			t.Fatalf("ensure absent: %v", err)
 		}
 	}
@@ -423,7 +404,7 @@ func TestEmptyTargetsAfterAgentRestartRemoveExistingProxyRoute(t *testing.T) {
 	}
 	rt.ClearOperations()
 	fresh := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
-	if err := fresh.SetTargets(context.Background(), "my-app", "web", nil, proxy.RouteOptions{}); err != nil {
+	if err := fresh.SetTargets(context.Background(), "my-app", "production", "web", nil, proxy.RouteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if countExecs(rt, "kamal-proxy remove") != 1 {
@@ -443,7 +424,7 @@ func TestEmptyTargetsPreserveGenuineProxyFailures(t *testing.T) {
 			rt.SetExecResult("serve-proxy", "Error: service not found\n", err)
 			manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
 			for i := 0; i < 2; i++ {
-				if got := manager.SetTargets(context.Background(), "my-app", "web", nil, proxy.RouteOptions{}); !errors.Is(got, err) {
+				if got := manager.SetTargets(context.Background(), "my-app", "production", "web", nil, proxy.RouteOptions{}); !errors.Is(got, err) {
 					t.Fatalf("proxy failure swallowed: %v", got)
 				}
 			}
@@ -461,11 +442,101 @@ func TestSetTargetsEmptyRemovesService(t *testing.T) {
 	if err := manager.AddTarget(context.Background(), webTarget()); err != nil {
 		t.Fatalf("AddTarget: %v", err)
 	}
-	if err := manager.SetTargets(context.Background(), "my-app", "web", nil, proxy.RouteOptions{}); err != nil {
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", nil, proxy.RouteOptions{}); err != nil {
 		t.Fatalf("SetTargets empty: %v", err)
 	}
 	if got := countExecs(rt, "kamal-proxy remove"); got != 1 {
 		t.Fatalf("expected empty target set to remove the service, operations: %v", rt.Operations())
+	}
+}
+
+func TestHealingLastTargetKeepsRouteSoHostCannotFallThrough(t *testing.T) {
+	rt := fakeruntime.NewRuntime()
+	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+	target := webTarget()
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{target}, proxy.RouteOptions{Hosts: []string{"a.test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rt.ClearOperations()
+
+	if err := manager.RemoveTarget(context.Background(), target); err != nil {
+		t.Fatalf("RemoveTarget: %v", err)
+	}
+
+	if got := countExecs(rt, "kamal-proxy remove"); got != 0 {
+		t.Fatalf("healing deleted the last route; its host would fall through to another service's catch-all: %v", rt.Operations())
+	}
+}
+
+func TestRouteNameIsScopedByDestination(t *testing.T) {
+	rt := fakeruntime.NewRuntime()
+	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+	production := webTarget()
+	staging := webTarget()
+	staging.Destination = "staging"
+	staging.ContainerName = "my-app-web-staging-abc123-r1"
+
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{production}, proxy.RouteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetTargets(context.Background(), "my-app", "staging", "web", []proxy.Target{staging}, proxy.RouteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	rt.ClearOperations()
+	if err := manager.SetTargets(context.Background(), "my-app", "staging", "web", nil, proxy.RouteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	removals := []string{}
+	for _, op := range rt.Operations() {
+		if strings.Contains(op, "kamal-proxy remove") {
+			removals = append(removals, op)
+		}
+	}
+	want := "exec_container:serve-proxy:kamal-proxy remove my-app/staging/web"
+	if len(removals) != 1 || removals[0] != want {
+		t.Fatalf("removing staging touched routes %v, want only %q", removals, want)
+	}
+}
+
+func TestDeployMigratesConflictingLegacyRoute(t *testing.T) {
+	rt := fakeruntime.NewRuntime()
+	startProxyContainer(t, rt)
+	conflict := "Error: host settings conflict with another service\n"
+	rt.QueueExecResult("serve-proxy", conflict, &runtime.ExecExitError{Code: 1, Output: conflict})
+	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+	rt.ClearOperations()
+
+	if err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{webTarget()}, proxy.RouteOptions{Hosts: []string{"a.test"}}); err != nil {
+		t.Fatalf("SetTargets: %v", err)
+	}
+
+	var verbs []string
+	for _, op := range rt.Operations() {
+		if fields := strings.Fields(strings.TrimPrefix(op, "exec_container:serve-proxy:")); len(fields) >= 3 && fields[0] == "kamal-proxy" {
+			verbs = append(verbs, fields[1]+" "+fields[2])
+		}
+	}
+	want := []string{"deploy my-app/production/web", "remove my-app-web", "deploy my-app/production/web"}
+	if strings.Join(verbs, ", ") != strings.Join(want, ", ") {
+		t.Fatalf("proxy calls = %v, want %v", verbs, want)
+	}
+}
+
+func TestDeployConflictWithoutLegacyRouteIsReported(t *testing.T) {
+	rt := fakeruntime.NewRuntime()
+	startProxyContainer(t, rt)
+	conflict := "Error: host settings conflict with another service\n"
+	notFound := "Error: service not found\n"
+	rt.QueueExecResult("serve-proxy", conflict, &runtime.ExecExitError{Code: 1, Output: conflict})
+	rt.QueueExecResult("serve-proxy", notFound, &runtime.ExecExitError{Code: 1, Output: notFound})
+	rt.QueueExecResult("serve-proxy", conflict, &runtime.ExecExitError{Code: 1, Output: conflict})
+	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+
+	err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{webTarget()}, proxy.RouteOptions{Hosts: []string{"a.test"}})
+
+	if err == nil || !strings.Contains(err.Error(), "host settings conflict") {
+		t.Fatalf("a genuine host conflict with another service must fail, got %v", err)
 	}
 }
 
@@ -530,4 +601,35 @@ func countExecs(rt *fakeruntime.Runtime, prefix string) int {
 		}
 	}
 	return count
+}
+
+func TestDefaultProxyImageIsPinnedByDigest(t *testing.T) {
+	if !strings.Contains(kamalproxy.DefaultImage, "@sha256:") {
+		t.Fatalf("DefaultImage %q is tag-addressed; a moved tag would change the root-adjacent proxy", kamalproxy.DefaultImage)
+	}
+}
+
+func TestProxyPullFailureIsToleratedWhenImageIsLocal(t *testing.T) {
+	rt := fakeruntime.NewRuntime()
+	rt.SetPullError(errors.New("registry unreachable"))
+	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+
+	if err := manager.AddTarget(context.Background(), webTarget()); err != nil {
+		t.Fatalf("proxy could not start from the local image while the registry was down: %v", err)
+	}
+}
+
+func TestSubSecondTimeoutsRoundUpInsteadOfDisablingThem(t *testing.T) {
+	rt := fakeruntime.NewRuntime()
+	manager := kamalproxy.New(rt, kamalproxy.Options{Network: "serve"})
+
+	err := manager.SetTargets(context.Background(), "my-app", "production", "web", []proxy.Target{webTarget()}, proxy.RouteOptions{DeployTimeout: 500 * time.Millisecond, DrainTimeout: 1500 * time.Millisecond})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := findExec(t, rt, "kamal-proxy deploy")
+	if !strings.Contains(exec, "--deploy-timeout=1s") || !strings.Contains(exec, "--drain-timeout=2s") {
+		t.Fatalf("timeouts not rounded up: %s", exec)
+	}
 }

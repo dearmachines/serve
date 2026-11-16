@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -14,7 +15,9 @@ import (
 )
 
 const (
-	DefaultImage         = "basecamp/kamal-proxy:v0.8.4"
+	// DefaultImage pins kamal-proxy v0.8.4 by digest so a moved tag cannot
+	// change the proxy that fronts every service.
+	DefaultImage         = "basecamp/kamal-proxy:v0.8.4@sha256:b46ad3ec565dea7f2a36ebc7837a6cbc0996fa1735db5429f9d2301d292c60fb"
 	DefaultContainerName = "serve-proxy"
 	DefaultDeployTimeout = 30 * time.Second
 	DefaultDrainTimeout  = 30 * time.Second
@@ -48,6 +51,9 @@ type routedService struct {
 	addresses  []string // sorted
 	healthPath string
 	route      proxy.RouteOptions
+	// legacyName is the pre-destination route name ("service-role") this
+	// route may need to take over from on upgraded hosts.
+	legacyName string
 }
 
 func New(rt runtime.Runtime, opts Options) *Manager {
@@ -70,12 +76,13 @@ func (m *Manager) AddTarget(ctx context.Context, target proxy.Target) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	service := serviceKey(target.Service, target.Role)
+	service := serviceKey(target.Service, target.Destination, target.Role)
 	current, known := m.routed[service]
 	next := routedService{
 		addresses:  addAddress(current.addresses, address(target)),
 		healthPath: firstNonEmpty(target.HealthPath, current.healthPath),
 		route:      current.route,
+		legacyName: legacyServiceKey(target.Service, target.Role),
 	}
 	return m.apply(ctx, service, current, next, !known)
 }
@@ -84,7 +91,7 @@ func (m *Manager) RemoveTarget(ctx context.Context, target proxy.Target) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	service := serviceKey(target.Service, target.Role)
+	service := serviceKey(target.Service, target.Destination, target.Role)
 	current, known := m.routed[service]
 	if !known {
 		return nil
@@ -93,19 +100,28 @@ func (m *Manager) RemoveTarget(ctx context.Context, target proxy.Target) error {
 		addresses:  removeAddress(current.addresses, address(target)),
 		healthPath: current.healthPath,
 		route:      current.route,
+		legacyName: current.legacyName,
+	}
+	// Never let a single-target removal empty the route. Deleting it would
+	// free its hostnames, and kamal-proxy then sends them to any host-less
+	// catch-all route of another service. Keeping the dead target returns
+	// 502 until healing recreates it (Docker DNS resolves the new address).
+	// Explicit removal goes through SetTargets with an empty set.
+	if len(next.addresses) == 0 {
+		return nil
 	}
 	return m.apply(ctx, service, current, next, false)
 }
 
-func (m *Manager) SetTargets(ctx context.Context, service string, role string, targets []proxy.Target, opts proxy.RouteOptions) error {
+func (m *Manager) SetTargets(ctx context.Context, service string, destination string, role string, targets []proxy.Target, opts proxy.RouteOptions) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	key := serviceKey(service, role)
+	key := serviceKey(service, destination, role)
 	current, known := m.routed[key]
 	opts.Hosts = append([]string(nil), opts.Hosts...)
 	sort.Strings(opts.Hosts)
-	next := routedService{route: opts}
+	next := routedService{route: opts, legacyName: legacyServiceKey(service, role)}
 	for _, target := range targets {
 		next.addresses = addAddress(next.addresses, address(target))
 		next.healthPath = firstNonEmpty(target.HealthPath, next.healthPath)
@@ -160,11 +176,35 @@ func (m *Manager) apply(ctx context.Context, service string, current routedServi
 		"--deploy-timeout="+formatTimeout(deployTimeout),
 		"--drain-timeout="+formatTimeout(drainTimeout),
 	)
-	if _, err := m.runtime.ExecContainer(ctx, proxyID, cmd); err != nil {
-		return fmt.Errorf("kamal-proxy deploy %s: %w", service, err)
+	if err := m.deploy(ctx, proxyID, service, next.legacyName, cmd); err != nil {
+		return err
 	}
 	m.routed[service] = next
 	return nil
+}
+
+// deploy runs a kamal-proxy deploy. Routes deployed by older agents were
+// named "service-role" and may still hold this route's hostnames (or the
+// host-less catch-all). kamal-proxy rejects the new name with a host
+// conflict in that case, so the legacy route is removed and the deploy
+// retried once. A conflict that remains is a genuine one and is reported.
+func (m *Manager) deploy(ctx context.Context, proxyID runtime.ContainerID, service string, legacyName string, cmd []string) error {
+	_, err := m.runtime.ExecContainer(ctx, proxyID, cmd)
+	if err != nil && legacyName != "" && isHostConflict(err) {
+		if removeErr := m.ensureRouteAbsent(ctx, proxyID, legacyName); removeErr != nil {
+			return errors.Join(fmt.Errorf("kamal-proxy deploy %s: %w", service, err), removeErr)
+		}
+		_, err = m.runtime.ExecContainer(ctx, proxyID, cmd)
+	}
+	if err != nil {
+		return fmt.Errorf("kamal-proxy deploy %s: %w", service, err)
+	}
+	return nil
+}
+
+func isHostConflict(err error) bool {
+	var exit *runtime.ExecExitError
+	return errors.As(err, &exit) && strings.Contains(exit.Output, "host settings conflict with another service")
 }
 
 // ensureRouteAbsent consults the proxy itself, not the agent's volatile cache.
@@ -224,9 +264,9 @@ func (m *Manager) ensureProxy(ctx context.Context) (runtime.ContainerID, error) 
 		}
 	}
 
-	if err := m.runtime.PullImage(ctx, m.opts.Image); err != nil {
-		return "", fmt.Errorf("pull proxy image %s: %w", m.opts.Image, err)
-	}
+	// A pull failure is tolerated when the image is already present: the
+	// registry being down must not keep the proxy from restarting.
+	pullErr := m.runtime.PullImage(ctx, m.opts.Image)
 	id, err := m.runtime.CreateContainer(ctx, runtime.ContainerSpec{
 		Name:  m.opts.ContainerName,
 		Image: m.opts.Image,
@@ -243,6 +283,9 @@ func (m *Manager) ensureProxy(ctx context.Context) (runtime.ContainerID, error) 
 		Volumes: []string{"serve-proxy-data:/home/kamal-proxy/.config/kamal-proxy"},
 	})
 	if err != nil {
+		if pullErr != nil {
+			return "", errors.Join(fmt.Errorf("pull proxy image %s: %w", m.opts.Image, pullErr), fmt.Errorf("create proxy container: %w", err))
+		}
 		return "", fmt.Errorf("create proxy container: %w", err)
 	}
 	if err := m.runtime.StartContainer(ctx, id); err != nil {
@@ -252,7 +295,14 @@ func (m *Manager) ensureProxy(ctx context.Context) (runtime.ContainerID, error) 
 	return id, nil
 }
 
-func serviceKey(service string, role string) string {
+// serviceKey names the kamal-proxy route for one role of one service
+// destination. Serve identifiers cannot contain "/", so the name is
+// unambiguous; kamal-proxy accepts it as a service name.
+func serviceKey(service string, destination string, role string) string {
+	return service + "/" + destination + "/" + role
+}
+
+func legacyServiceKey(service string, role string) string {
 	return service + "-" + role
 }
 
@@ -302,6 +352,8 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// formatTimeout renders whole seconds for kamal-proxy, rounding up so a
+// sub-second setting never becomes 0s.
 func formatTimeout(d time.Duration) string {
-	return fmt.Sprintf("%ds", int(d.Seconds()))
+	return fmt.Sprintf("%ds", int64(math.Ceil(d.Seconds())))
 }

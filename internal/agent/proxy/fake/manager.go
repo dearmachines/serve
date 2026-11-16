@@ -31,10 +31,10 @@ func (m *Manager) RemoveTarget(ctx context.Context, target proxy.Target) error {
 	return nil
 }
 
-func (m *Manager) SetTargets(ctx context.Context, service string, role string, targets []proxy.Target, opts proxy.RouteOptions) error {
+func (m *Manager) SetTargets(ctx context.Context, service string, destination string, role string, targets []proxy.Target, opts proxy.RouteOptions) error {
 	_ = ctx
 	for name, existing := range m.targets {
-		if existing.Service == service && existing.Role == role {
+		if existing.Service == service && existing.Destination == destination && existing.Role == role {
 			delete(m.targets, name)
 		}
 	}
