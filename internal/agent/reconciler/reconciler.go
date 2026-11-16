@@ -140,6 +140,20 @@ func (r *Reconciler) ensureContainer(ctx context.Context, desired planner.Desire
 		result.RemovedExisting = true
 	}
 
+	if len(container.Aliases) > 0 && desired.Network != "" {
+		requested := map[string]string{}
+		for _, alias := range container.Aliases {
+			requested[alias] = container.Role
+		}
+		states, err := r.runtime.ListContainers(ctx, runtime.ContainerFilters{})
+		if err != nil {
+			return result, err
+		}
+		if err := AliasOwnershipError(states, desired.Network, desired.Service, desired.Destination, requested); err != nil {
+			return result, err
+		}
+	}
+
 	// Pull failures are tolerated when the exact image is already present
 	// locally. If creation also fails, report both errors so registry failures
 	// are not hidden behind Docker's missing-image response.
@@ -330,4 +344,33 @@ func copyStringMap(source map[string]string) map[string]string {
 		copy[key] = value
 	}
 	return copy
+}
+
+// AliasOwnershipError reports the first requested alias (alias -> role) that
+// another workload already holds on network. Stopped containers count as
+// owners: they get their alias back when healed, and Docker DNS would then
+// resolve one name to two services.
+func AliasOwnershipError(states []runtime.ContainerState, network string, service string, destination string, requested map[string]string) error {
+	for _, state := range states {
+		if state.Network != network {
+			continue
+		}
+		for _, alias := range state.Aliases {
+			role, requestedHere := requested[alias]
+			if !requestedHere {
+				continue
+			}
+			if state.Labels["serve.service"] == service &&
+				state.Labels["serve.destination"] == destination &&
+				state.Labels["serve.role"] == role {
+				continue
+			}
+			owner := state.Name
+			if ownerService, ownerRole := state.Labels["serve.service"], state.Labels["serve.role"]; ownerService != "" && ownerRole != "" {
+				owner = ownerService + "/" + ownerRole
+			}
+			return fmt.Errorf("network alias %q is already owned by %s on network %q", alias, owner, network)
+		}
+	}
+	return nil
 }

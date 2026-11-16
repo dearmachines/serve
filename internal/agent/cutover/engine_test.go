@@ -312,6 +312,35 @@ func TestAliasActivationRejectsAnotherServiceOwner(t *testing.T) {
 	}
 }
 
+func TestAliasActivationRejectsStoppedOwnerOfAnotherService(t *testing.T) {
+	env := newEnv(t)
+	// A crashed container still holds its alias and will get it back when healed.
+	if _, err := env.rt.CreateContainer(context.Background(), runtime.ContainerSpec{
+		Name:    "other-api-production-v1-r1",
+		Image:   "other:v1",
+		Network: "serve",
+		Aliases: []string{"api"},
+		Labels: map[string]string{
+			"serve.managed":     "true",
+			"serve.service":     "other",
+			"serve.destination": "production",
+			"serve.role":        "web",
+			"serve.version":     "v1",
+		},
+	}); err != nil {
+		t.Fatalf("create stopped foreign container: %v", err)
+	}
+
+	desired := desiredState("abc123", 1, false)
+	desired.Containers[0].Aliases = []string{"api"}
+	env.checker.SetStatus(desired.Containers[0].Name, health.Healthy)
+
+	err := env.engine.Apply(context.Background(), desired)
+	if err == nil || !strings.Contains(err.Error(), `network alias "api" is already owned by other/web`) {
+		t.Fatalf("Apply error = %v, want stopped owner to keep its alias", err)
+	}
+}
+
 func TestUnhealthyAliasedDependentKeepsOldVersionServing(t *testing.T) {
 	env := newEnv(t)
 	current := desiredState("abc123", 1, true)

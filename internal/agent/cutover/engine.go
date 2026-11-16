@@ -313,28 +313,7 @@ func (e *Engine) validateAliasOwnership(ctx context.Context, desired planner.Des
 	if err != nil {
 		return err
 	}
-	for _, state := range states {
-		if !state.Running || state.Network != desired.Network {
-			continue
-		}
-		for _, alias := range state.Aliases {
-			role, requestedHere := requested[alias]
-			if !requestedHere {
-				continue
-			}
-			if state.Labels["serve.service"] == desired.Service &&
-				state.Labels["serve.destination"] == desired.Destination &&
-				state.Labels["serve.role"] == role {
-				continue
-			}
-			owner := state.Name
-			if service, ownerRole := state.Labels["serve.service"], state.Labels["serve.role"]; service != "" && ownerRole != "" {
-				owner = service + "/" + ownerRole
-			}
-			return fmt.Errorf("network alias %q is already owned by %s on network %q", alias, owner, desired.Network)
-		}
-	}
-	return nil
+	return reconciler.AliasOwnershipError(states, desired.Network, desired.Service, desired.Destination, requested)
 }
 
 func (e *Engine) deactivateOldAliases(ctx context.Context, desired planner.DesiredState, existing []runtime.ContainerState) error {

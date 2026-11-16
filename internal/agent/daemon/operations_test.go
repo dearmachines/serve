@@ -70,7 +70,7 @@ func TestFailedStateRemovalKeepsAuthoritativeDesiredState(t *testing.T) {
 	d := New(Config{Runtime: rt, StateDir: t.TempDir(), ProxyManager: fakeproxy.NewManager(), HealthChecker: &reconcileGate{}})
 	putSerial(t, d, serialDesired("app", "v1"))
 	// Make rollback-state cleanup fail without relying on Unix user permissions.
-	path := filepath.Join(d.store.Dir(), "app.production.last-good.json")
+	path := d.store.Path("app", "production", "last-good")
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}

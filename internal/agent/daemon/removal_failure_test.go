@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/uptimenine/serve/internal/agent/proxy"
@@ -89,7 +88,7 @@ func TestPartialRemovalRepairsWriteFailuresOnRetry(t *testing.T) {
 			d := New(Config{Runtime: rt, StateDir: t.TempDir(), ProxyManager: manager, HealthChecker: &reconcileGate{}})
 			putSerial(t, d, removalDesired())
 			var restore func()
-			path := filepath.Join(d.store.Dir(), "app.production."+kind+".json")
+			path := d.store.Path("app", "production", kind)
 			if kind == "last-good" {
 				restore = blockStateWrite(t, path)
 			} else {

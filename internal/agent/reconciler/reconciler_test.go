@@ -347,3 +347,31 @@ func desiredState(version string) planner.DesiredState {
 		},
 	}
 }
+
+func TestReconcileRefusesToRecreateAliasNowOwnedByAnotherService(t *testing.T) {
+	rt := fake.NewRuntime()
+	ownerID, err := rt.CreateContainer(context.Background(), runtime.ContainerSpec{
+		Name:    "other-web-production-v1-r1",
+		Image:   "other:v1",
+		Network: "serve",
+		Aliases: []string{"api"},
+		Labels:  map[string]string{"serve.managed": "true", "serve.service": "other", "serve.destination": "production", "serve.role": "web"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.StartContainer(context.Background(), ownerID); err != nil {
+		t.Fatal(err)
+	}
+	desired := desiredState("abc123")
+	desired.Containers[0].Aliases = []string{"api"}
+
+	_, err = reconciler.New(rt).Reconcile(context.Background(), desired)
+
+	if err == nil || !strings.Contains(err.Error(), `network alias "api" is already owned by other/web`) {
+		t.Fatalf("Reconcile error = %v, want alias conflict", err)
+	}
+	if _, ok := rt.CreatedSpec(desired.Containers[0].Name); ok {
+		t.Fatal("healing recreated a container claiming another service's alias")
+	}
+}

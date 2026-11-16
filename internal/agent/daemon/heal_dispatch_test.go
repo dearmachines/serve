@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -81,5 +83,38 @@ func TestCrashLoopBackoffDoesNotDelayHealingOfOtherServices(t *testing.T) {
 			t.Fatal("b-ok was not healed while a-loop waited out its backoff")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+func TestStateKeysDoNotCollideForDottedIdentities(t *testing.T) {
+	if stateKey("shop.api", "prod") == stateKey("shop", "api.prod") {
+		t.Fatal("distinct (service, destination) identities share a lock and healing key")
+	}
+}
+
+func TestReconcileContinuesPastCorruptDesiredState(t *testing.T) {
+	rt := fake.NewRuntime()
+	d := New(Config{Runtime: rt, StateDir: t.TempDir(), ProxyManager: fakeproxy.NewManager(), HealthChecker: &reconcileGate{}, ErrorLog: io.Discard})
+	putSerial(t, d, serialDesired("good", "v1"))
+	corrupt := d.store.Path("broken", "production", "desired")
+	if err := os.MkdirAll(filepath.Dir(corrupt), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(corrupt, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	states, _ := rt.ListContainers(context.Background(), runtime.ContainerFilters{Labels: map[string]string{"serve.service": "good"}})
+	if err := rt.RemoveContainer(context.Background(), states[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	err := d.reconcileAll(context.Background())
+
+	if err == nil {
+		t.Fatal("corrupt desired state was not reported")
+	}
+	states, _ = rt.ListContainers(context.Background(), runtime.ContainerFilters{Labels: map[string]string{"serve.service": "good"}})
+	if len(states) != 1 || !states[0].Running {
+		t.Fatal("one corrupt desired-state file stopped reconcile for every service")
 	}
 }

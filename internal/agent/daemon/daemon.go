@@ -228,12 +228,13 @@ func (d *Daemon) startBackgroundReconcile(ctx context.Context, source string) {
 // reconcileAll enumerates identities, then reloads each desired state under
 // its operation lock. A snapshot taken before a deployment must never undo it.
 func (d *Daemon) reconcileAll(ctx context.Context) error {
+	// ListDesired returns every readable state alongside errors for the rest,
+	// so one bad file does not stop reconcile for other services.
 	states, err := d.store.ListDesired()
-	if err != nil {
-		return fmt.Errorf("list desired states: %w", err)
-	}
-
 	var errs []error
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list desired states: %w", err))
+	}
 	for _, desired := range states {
 		if err := d.reconcileOne(ctx, desired.Service, desired.Destination); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile %s %s: %w", desired.Service, desired.Destination, err))
@@ -533,8 +534,10 @@ func (d *Daemon) logError(format string, args ...any) {
 	fmt.Fprintf(d.errorLog, "serve-agent: "+format+"\n", args...)
 }
 
+// stateKey identifies a (service, destination) pair. Identifiers cannot
+// contain "/", so dotted names cannot collide.
 func stateKey(service string, destination string) string {
-	return service + "." + destination
+	return service + "/" + destination
 }
 
 func (d *Daemon) operationLock(key string) *sync.Mutex {

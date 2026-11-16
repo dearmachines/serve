@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -65,7 +64,7 @@ func TestMaintenanceReportsCompletedDeletionWhenActualStateWriteFails(t *testing
 				putSerial(t, d, serialDesired("app", "v1"))
 				putSerial(t, d, serialDesired("app", "v2"))
 			}
-			restore := blockStateWrite(t, filepath.Join(d.store.Dir(), "app.production.actual.json"))
+			restore := blockStateWrite(t, d.store.Path("app", "production", "actual"))
 			run := func() *httptest.ResponseRecorder {
 				if operation == "remove" {
 					return removeWeb(t, d)
