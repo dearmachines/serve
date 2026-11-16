@@ -690,3 +690,29 @@ func baseConfig() config.Config {
 		Env:              config.EnvConfig{Plain: map[string]string{"RACK_ENV": "production"}},
 	}
 }
+
+func TestPlanCarriesWorkloadResources(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Servers = map[string]config.ServerConfig{
+		"web": {Hosts: []string{"app1.example.com"}, Resources: config.ResourcesConfig{Memory: "512m", CPUs: "0.5", Pids: 256}},
+	}
+	unlimited := baseConfig()
+	unlimited.Servers = map[string]config.ServerConfig{"web": {Hosts: []string{"app1.example.com"}}}
+
+	state, err := planner.Plan(cfg, planner.Options{Host: "app1.example.com", Version: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := planner.Plan(unlimited, planner.Options{Host: "app1.example.com", Version: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := planner.Resources{MemoryBytes: 512 << 20, NanoCPUs: 500_000_000, PidsLimit: 256}
+	if got := state.Containers[0].Resources; got != want {
+		t.Fatalf("resources = %#v, want %#v", got, want)
+	}
+	if state.Containers[0].Labels["serve.spec_hash"] == baseline.Containers[0].Labels["serve.spec_hash"] {
+		t.Fatal("changing resources must change the spec hash so containers are recreated")
+	}
+}

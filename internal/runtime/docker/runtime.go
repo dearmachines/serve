@@ -76,6 +76,10 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec runtime.ContainerSpe
 		Env:          env,
 		ExposedPorts: exposedPorts(spec.Ports),
 	}
+	pidsLimit := spec.Resources.PidsLimit
+	if pidsLimit <= 0 {
+		pidsLimit = DefaultPidsLimit
+	}
 	hostConfig := &container.HostConfig{
 		Mounts:       mounts,
 		PortBindings: portBindings(spec.Ports),
@@ -83,6 +87,17 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec runtime.ContainerSpe
 			Name:              container.RestartPolicyMode(spec.Restart.Policy),
 			MaximumRetryCount: spec.Restart.MaxAttempts,
 		},
+		Resources: container.Resources{
+			Memory:    spec.Resources.MemoryBytes,
+			NanoCPUs:  spec.Resources.NanoCPUs,
+			PidsLimit: &pidsLimit,
+		},
+		// Rotated logs keep one chatty workload from filling the host disk.
+		LogConfig: container.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "10m", "max-file": "3"}},
+		// Workloads share the serve bridge; deny setuid escalation and raw
+		// sockets (ARP/packet spoofing against neighbours).
+		SecurityOpt: []string{"no-new-privileges"},
+		CapDrop:     []string{"NET_RAW"},
 	}
 	networkingConfig := &network.NetworkingConfig{}
 	if spec.Network != "" {
@@ -214,6 +229,10 @@ func (r *Runtime) Events(ctx context.Context) (<-chan runtime.RuntimeEvent, erro
 
 	return out, nil
 }
+
+// DefaultPidsLimit bounds processes per container when none is configured,
+// so a fork bomb in one workload cannot exhaust the host's PID space.
+const DefaultPidsLimit = 4096
 
 // MaxExecOutputBytes caps how much exec output the agent buffers in memory.
 const MaxExecOutputBytes = 10 << 20

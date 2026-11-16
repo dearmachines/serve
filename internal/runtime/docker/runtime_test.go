@@ -236,3 +236,54 @@ func dockerAuthConfig(registry string, username string, password string) string 
 	auth := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 	return fmt.Sprintf(`{"auths":{%q:{"auth":%q}}}`, registry, auth)
 }
+
+func captureCreate(t *testing.T, spec serveruntime.ContainerSpec) containertypes.CreateRequest {
+	t.Helper()
+	var request containertypes.CreateRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode create request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"Id":"container-id","Warnings":[]}`)
+	}))
+	t.Cleanup(server.Close)
+	if _, err := New(dockerClientForServer(t, server)).CreateContainer(context.Background(), spec); err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	if request.HostConfig == nil {
+		t.Fatal("create request is missing host config")
+	}
+	return request
+}
+
+func TestCreateContainerAppliesConfiguredResourceLimits(t *testing.T) {
+	request := captureCreate(t, serveruntime.ContainerSpec{
+		Name:      "app",
+		Image:     "busybox:1.36",
+		Resources: serveruntime.Resources{MemoryBytes: 512 << 20, NanoCPUs: 500_000_000, PidsLimit: 256},
+	})
+
+	host := request.HostConfig
+	if host.Memory != 512<<20 || host.NanoCPUs != 500_000_000 || host.PidsLimit == nil || *host.PidsLimit != 256 {
+		t.Fatalf("resources = memory %d, cpus %d, pids %v", host.Memory, host.NanoCPUs, host.PidsLimit)
+	}
+}
+
+func TestCreateContainerAppliesSafeDefaultsWithoutConfiguredLimits(t *testing.T) {
+	request := captureCreate(t, serveruntime.ContainerSpec{Name: "app", Image: "busybox:1.36"})
+
+	host := request.HostConfig
+	if host.PidsLimit == nil || *host.PidsLimit != DefaultPidsLimit {
+		t.Fatalf("default pids limit = %v, want %d", host.PidsLimit, DefaultPidsLimit)
+	}
+	if host.LogConfig.Type != "json-file" || host.LogConfig.Config["max-size"] != "10m" || host.LogConfig.Config["max-file"] != "3" {
+		t.Fatalf("log config = %#v, want rotated json-file logs", host.LogConfig)
+	}
+	if !reflect.DeepEqual(host.SecurityOpt, []string{"no-new-privileges"}) {
+		t.Fatalf("security options = %#v", host.SecurityOpt)
+	}
+	if !reflect.DeepEqual([]string(host.CapDrop), []string{"CAP_NET_RAW"}) {
+		t.Fatalf("dropped capabilities = %#v", host.CapDrop)
+	}
+}

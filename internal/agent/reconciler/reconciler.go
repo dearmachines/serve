@@ -176,6 +176,11 @@ func (r *Reconciler) ensureContainer(ctx context.Context, desired planner.Desire
 		Network:  desired.Network,
 		Aliases:  append([]string(nil), container.Aliases...),
 		Volumes:  append([]string(nil), container.Volumes...),
+		Resources: runtime.Resources{
+			MemoryBytes: container.Resources.MemoryBytes,
+			NanoCPUs:    container.Resources.NanoCPUs,
+			PidsLimit:   container.Resources.PidsLimit,
+		},
 	})
 	cleanupErr := cleanupEnvFiles(envFiles)
 	if createErr != nil {

@@ -1020,3 +1020,45 @@ func writeFile(t *testing.T, path string, contents string) {
 		t.Fatalf("write test file: %v", err)
 	}
 }
+
+func TestLoadAcceptsWorkloadResources(t *testing.T) {
+	cfg, err := config.Load(writeConfig(t, "serve.yml", `
+service: app
+image: app
+servers:
+  web:
+    resources:
+      memory: 512m
+      cpus: 0.5
+      pids: 256
+dependencies:
+  db:
+    image: postgres
+    resources:
+      memory: 1g
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Servers["web"].Resources; got.Memory != "512m" || got.CPUs != "0.5" || got.Pids != 256 {
+		t.Fatalf("web resources = %#v", got)
+	}
+	if got := cfg.Dependencies["db"].Resources.Memory; got != "1g" {
+		t.Fatalf("db memory = %q", got)
+	}
+}
+
+func TestLoadRejectsInvalidWorkloadResources(t *testing.T) {
+	for _, test := range []struct{ name, resources, want string }{
+		{"memory", "memory: lots", "servers.web.resources.memory"},
+		{"cpus", "cpus: -1", "servers.web.resources.cpus"},
+		{"pids", "pids: -1", "servers.web.resources.pids"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := config.Load(writeConfig(t, "serve.yml", "service: app\nimage: app\nservers:\n  web:\n    resources:\n      "+test.resources+"\n"))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}

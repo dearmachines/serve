@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	units "github.com/docker/go-units"
 
 	"github.com/uptimenine/serve/internal/volume"
 	"gopkg.in/yaml.v3"
@@ -48,6 +52,53 @@ type ServerConfig struct {
 	Volumes     []string          `yaml:"volumes"`
 	Healthcheck HealthcheckConfig `yaml:"healthcheck"`
 	Restart     RestartConfig     `yaml:"restart"`
+	Resources   ResourcesConfig   `yaml:"resources"`
+}
+
+// ResourcesConfig limits one workload container. Empty fields leave the
+// limit unset (pids still gets the agent's default).
+type ResourcesConfig struct {
+	Memory string `yaml:"memory"` // e.g. 512m, 1g
+	CPUs   string `yaml:"cpus"`   // e.g. 0.5, 2
+	Pids   int    `yaml:"pids"`
+}
+
+// MemoryBytes parses Memory; zero means unlimited.
+func (r ResourcesConfig) MemoryBytes() (int64, error) {
+	if strings.TrimSpace(r.Memory) == "" {
+		return 0, nil
+	}
+	bytes, err := units.RAMInBytes(r.Memory)
+	if err != nil || bytes <= 0 {
+		return 0, fmt.Errorf("memory must be a positive size such as 512m or 1g")
+	}
+	return bytes, nil
+}
+
+// NanoCPUs parses CPUs; zero means unlimited.
+func (r ResourcesConfig) NanoCPUs() (int64, error) {
+	if strings.TrimSpace(r.CPUs) == "" {
+		return 0, nil
+	}
+	cpus, err := strconv.ParseFloat(r.CPUs, 64)
+	if err != nil || cpus <= 0 || math.IsInf(cpus, 0) || math.IsNaN(cpus) {
+		return 0, fmt.Errorf("cpus must be a positive number such as 0.5 or 2")
+	}
+	return int64(cpus * 1e9), nil
+}
+
+func validateResources(path string, resources ResourcesConfig) []string {
+	var problems []string
+	if _, err := resources.MemoryBytes(); err != nil {
+		problems = append(problems, path+".memory: "+err.Error())
+	}
+	if _, err := resources.NanoCPUs(); err != nil {
+		problems = append(problems, path+".cpus: "+err.Error())
+	}
+	if resources.Pids < 0 {
+		problems = append(problems, path+".pids must not be negative")
+	}
+	return problems
 }
 
 type HealthcheckConfig struct {
@@ -93,6 +144,7 @@ type DependencyConfig struct {
 	Publish      *DependencyPublishConfig `yaml:"publish"`
 	Volumes      []string                 `yaml:"volumes"`
 	Restart      RestartConfig            `yaml:"restart"`
+	Resources    ResourcesConfig          `yaml:"resources"`
 	Env          EnvConfig                `yaml:"env"`
 }
 
@@ -482,6 +534,7 @@ func validate(cfg Config) error {
 		problems = append(problems, validateHealthcheck("servers."+role+".healthcheck", server.Healthcheck)...)
 		problems = append(problems, validateSSHHosts("servers."+role+".hosts", server.Hosts)...)
 		problems = append(problems, validateVolumes("servers."+role+".volumes", server.Volumes)...)
+		problems = append(problems, validateResources("servers."+role+".resources", server.Resources)...)
 		if server.Replicas < 0 {
 			problems = append(problems, "servers."+role+".replicas must not be negative")
 		}
@@ -505,6 +558,7 @@ func validate(cfg Config) error {
 		problems = append(problems, validateRestart(path+".restart", dependency.Restart)...)
 		problems = append(problems, validateSSHHosts(path+".hosts", dependency.Hosts)...)
 		problems = append(problems, validateVolumes(path+".volumes", dependency.Volumes)...)
+		problems = append(problems, validateResources(path+".resources", dependency.Resources)...)
 		if strings.TrimSpace(dependency.Image) == "" {
 			problems = append(problems, path+".image is required")
 		}

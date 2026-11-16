@@ -251,6 +251,34 @@ Named volumes are local to each Docker host and survive container replacement, `
 
 Replicas and blue-green versions that use the same named volume access the same data concurrently. In particular, versioned dependencies can briefly overlap during deployment, so a volume mount alone does not provide a safe zero-downtime database lifecycle.
 
+Volume names starting with `serve-` are reserved for Serve's own data, such as `serve-proxy-data`, and are rejected.
+
+## Resource limits
+
+Workloads share their host, so cap what one container can take. `resources` works on application roles and dependencies:
+
+```yaml
+servers:
+  web:
+    resources:
+      memory: 512m
+      cpus: 0.5
+      pids: 256
+
+dependencies:
+  postgres:
+    resources:
+      memory: 1g
+```
+
+Fields you leave out are unlimited, except `pids`, which defaults to 4096. Changing `resources` recreates the affected containers on the next deploy.
+
+Every workload container also gets these settings, whatever its configuration:
+
+- Logs use the `json-file` driver, rotated at 10 MB with 3 files kept. This overrides the host's default log driver.
+- Processes cannot gain privileges through setuid binaries (`no-new-privileges`).
+- The `NET_RAW` capability is dropped, so raw sockets and tools such as `ping` don't work inside containers.
+
 ## Private images
 
 Authenticate Docker to private registries on every deployment host before deploying. Serve reads the host's standard Docker client configuration, including credential helpers, but does not provision credentials. See [Private registry access](docs/private-registry-access.md).

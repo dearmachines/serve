@@ -375,3 +375,19 @@ func TestReconcileRefusesToRecreateAliasNowOwnedByAnotherService(t *testing.T) {
 		t.Fatal("healing recreated a container claiming another service's alias")
 	}
 }
+
+func TestReconcilePassesResourcesToRuntime(t *testing.T) {
+	rt := fake.NewRuntime()
+	desired := desiredState("abc123")
+	desired.Containers[0].Resources = planner.Resources{MemoryBytes: 1 << 30, NanoCPUs: 1e9, PidsLimit: 100}
+
+	if _, err := reconciler.New(rt).Reconcile(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, ok := rt.CreatedSpec(desired.Containers[0].Name)
+	want := runtime.Resources{MemoryBytes: 1 << 30, NanoCPUs: 1e9, PidsLimit: 100}
+	if !ok || spec.Resources != want {
+		t.Fatalf("runtime resources = %#v, want %#v", spec.Resources, want)
+	}
+}
