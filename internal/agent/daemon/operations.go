@@ -288,7 +288,7 @@ func (d *Daemon) removeIntent(ctx context.Context, request RemoveRequest) error 
 			}
 		}
 		for role := range routes {
-			if err := d.proxy.SetTargets(ctx, desired.Service, role, nil, proxy.RouteOptions{}); err != nil {
+			if err := d.proxy.SetTargets(ctx, desired.Service, desired.Destination, role, nil, proxy.RouteOptions{}); err != nil {
 				return err
 			}
 		}

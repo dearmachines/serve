@@ -442,6 +442,7 @@ func (e *Engine) switchTraffic(ctx context.Context, desired planner.DesiredState
 	for _, container := range primary {
 		byRole[container.Role] = append(byRole[container.Role], proxy.Target{
 			Service:       desired.Service,
+			Destination:   desired.Destination,
 			Role:          container.Role,
 			ContainerName: container.Name,
 			Port:          healthPort(container),
@@ -457,7 +458,7 @@ func (e *Engine) switchTraffic(ctx context.Context, desired planner.DesiredState
 
 	opts := routeOptions(desired.Proxy)
 	for _, role := range roles {
-		if err := e.deps.Proxy.SetTargets(ctx, desired.Service, role, byRole[role], opts); err != nil {
+		if err := e.deps.Proxy.SetTargets(ctx, desired.Service, desired.Destination, role, byRole[role], opts); err != nil {
 			return err
 		}
 	}

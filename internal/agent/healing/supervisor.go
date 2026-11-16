@@ -158,7 +158,7 @@ func (s *Supervisor) HandleRuntimeEvent(ctx context.Context, event runtime.Runti
 		return Result{MarkedUnhealthy: true}, nil
 	}
 
-	if err := s.removeProxyTarget(ctx, desired.Service, container); err != nil {
+	if err := s.removeProxyTarget(ctx, desired.Service, desired.Destination, container); err != nil {
 		return Result{}, err
 	}
 	if err := s.sleepBackoff(ctx, container.Restart, attempt); err != nil {
@@ -211,12 +211,13 @@ func shouldRestart(restart planner.Restart, event runtime.RuntimeEvent) bool {
 	}
 }
 
-func (s *Supervisor) removeProxyTarget(ctx context.Context, service string, container planner.Container) error {
+func (s *Supervisor) removeProxyTarget(ctx context.Context, service string, destination string, container planner.Container) error {
 	if !container.Proxy || s.proxyManager == nil {
 		return nil
 	}
 	return s.proxyManager.RemoveTarget(ctx, proxy.Target{
 		Service:       service,
+		Destination:   destination,
 		Role:          container.Role,
 		ContainerName: container.Name,
 		Port:          targetPort(container),

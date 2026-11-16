@@ -372,7 +372,7 @@ func (p *orderAssertingProxy) AddTarget(ctx context.Context, target proxy.Target
 	return nil
 }
 
-func (p *orderAssertingProxy) SetTargets(ctx context.Context, service string, role string, targets []proxy.Target, opts proxy.RouteOptions) error {
+func (p *orderAssertingProxy) SetTargets(ctx context.Context, service string, destination string, role string, targets []proxy.Target, opts proxy.RouteOptions) error {
 	_ = ctx
 	_ = service
 	_ = role

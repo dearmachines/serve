@@ -33,6 +33,7 @@ func TestReconcileAddsHealthyWebContainerToProxy(t *testing.T) {
 	}
 	expected := proxy.Target{
 		Service:       "my-app",
+		Destination:   "production",
 		Role:          "web",
 		ContainerName: "my-app-web-production-abc123-r1",
 		Port:          3000,

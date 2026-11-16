@@ -81,7 +81,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, desired planner.DesiredState
 			summary.ContainersCreated++
 			summary.ContainersStarted++
 		}
-		if err := r.reconcileProxyTarget(ctx, desired.Service, container); err != nil {
+		if err := r.reconcileProxyTarget(ctx, desired.Service, desired.Destination, container); err != nil {
 			return summary, err
 		}
 	}
@@ -229,7 +229,7 @@ func (r *Reconciler) materializeSecrets(ctx context.Context, desired planner.Des
 	return []string{envFile}, nil
 }
 
-func (r *Reconciler) reconcileProxyTarget(ctx context.Context, service string, container planner.Container) error {
+func (r *Reconciler) reconcileProxyTarget(ctx context.Context, service string, destination string, container planner.Container) error {
 	if !container.Proxy {
 		return nil
 	}
@@ -249,6 +249,7 @@ func (r *Reconciler) reconcileProxyTarget(ctx context.Context, service string, c
 
 	proxyTarget := proxy.Target{
 		Service:       service,
+		Destination:   destination,
 		Role:          container.Role,
 		ContainerName: container.Name,
 		Port:          target.Port,

@@ -72,13 +72,13 @@ type removalFaultProxy struct {
 	fault func()
 }
 
-func (p *removalFaultProxy) SetTargets(ctx context.Context, service, role string, targets []proxy.Target, opts proxy.RouteOptions) error {
+func (p *removalFaultProxy) SetTargets(ctx context.Context, service, destination, role string, targets []proxy.Target, opts proxy.RouteOptions) error {
 	if len(targets) == 0 && p.fault != nil {
 		fault := p.fault
 		p.fault = nil
 		fault()
 	}
-	return p.Manager.SetTargets(ctx, service, role, targets, opts)
+	return p.Manager.SetTargets(ctx, service, destination, role, targets, opts)
 }
 
 func TestPartialRemovalRepairsWriteFailuresOnRetry(t *testing.T) {

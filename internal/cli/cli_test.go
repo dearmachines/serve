@@ -482,7 +482,7 @@ servers:
 	}
 	deployed := false
 	for _, op := range rt.Operations() {
-		if strings.HasPrefix(op, "exec_container:serve-proxy:kamal-proxy deploy my-app-web") {
+		if strings.HasPrefix(op, "exec_container:serve-proxy:kamal-proxy deploy my-app/production/web") {
 			deployed = true
 		}
 	}
