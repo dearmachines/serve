@@ -244,3 +244,72 @@ func TestListDesiredSkipsCorruptFileButReturnsTheRest(t *testing.T) {
 		t.Fatalf("one corrupt file blocked every other service: %#v", states)
 	}
 }
+
+func TestCorruptLegacyFileDoesNotBlockOtherServices(t *testing.T) {
+	dir := t.TempDir()
+	valid, err := json.Marshal(desiredState("v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "my-app.production.desired.json"), valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := filepath.Join(dir, "broken.production.desired.json")
+	if err := os.WriteFile(corrupt, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := agentstate.NewStore(dir)
+
+	states, err := store.ListDesired()
+	if err == nil {
+		t.Fatal("corrupt legacy file was not reported")
+	}
+	if len(states) != 1 || states[0].Service != "my-app" {
+		t.Fatalf("valid legacy service was not migrated: %#v", states)
+	}
+	if loaded, err := store.LoadDesired("my-app", "production"); err != nil || loaded.Version != "v1" {
+		t.Fatalf("LoadDesired for a healthy service = %q %v; one corrupt legacy file poisoned it", loaded.Version, err)
+	}
+	if err := store.SaveDesired(desiredState("v2")); err != nil {
+		t.Fatalf("SaveDesired for a healthy service: %v", err)
+	}
+	if err := store.SaveLastGood(desiredState("v2")); err != nil {
+		t.Fatalf("SaveLastGood for a healthy service: %v", err)
+	}
+	if _, err := store.LoadActual("my-app", "production"); err != nil {
+		t.Fatalf("LoadActual for a healthy service: %v", err)
+	}
+
+	// Removing the bad file recovers without restarting the agent.
+	if err := os.Remove(corrupt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListDesired(); err != nil {
+		t.Fatalf("ListDesired still failing after the corrupt legacy file was removed: %v", err)
+	}
+}
+
+func TestFailedLegacyMigrationFailsOnlyThatIdentity(t *testing.T) {
+	dir := t.TempDir()
+	legacy, err := json.Marshal(desiredState("old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "my-app.production.desired.json"), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file where the service directory belongs makes the move fail.
+	if err := os.WriteFile(filepath.Join(dir, "my-app"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := agentstate.NewStore(dir)
+
+	if _, err := store.LoadDesired("my-app", "production"); err == nil || os.IsNotExist(err) {
+		t.Fatalf("LoadDesired hid the failed migration of its own legacy state: %v", err)
+	}
+	other := desiredState("v1")
+	other.Service = "other"
+	if err := store.SaveDesired(other); err != nil {
+		t.Fatalf("an unrelated identity was blocked by another's failed migration: %v", err)
+	}
+}

@@ -19,8 +19,12 @@ import (
 type Store struct {
 	dir string
 
-	migrateOnce sync.Once
-	migrateErr  error
+	// Legacy migration reruns until it completes cleanly, so removing a bad
+	// legacy file recovers without restarting the agent.
+	migrateMu     sync.Mutex
+	migrated      bool
+	migrateErrs   map[string]error // per identity whose legacy file failed to move
+	migrateOthers error            // files whose identity could not be read
 }
 
 var stateKinds = []string{"desired", "actual", "last-good"}
@@ -55,21 +59,49 @@ func (s *Store) Path(service string, destination string, kind string) string {
 
 // migrate moves flat files written by older agents
 // ("<service>.<destination>.<kind>.json", ambiguous for dotted names) to the
-// per-service layout. The identity comes from the file's own contents.
+// per-service layout. The identity comes from the file's own contents. It
+// returns every migration failure; see migrateIdentity for single-identity
+// operations.
 func (s *Store) migrate() error {
-	s.migrateOnce.Do(func() { s.migrateErr = migrateLegacy(s.dir) })
-	return s.migrateErr
+	s.migrateMu.Lock()
+	defer s.migrateMu.Unlock()
+	s.runMigrationLocked()
+	errs := []error{s.migrateOthers}
+	for _, err := range s.migrateErrs {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
-func migrateLegacy(dir string) error {
+// migrateIdentity runs the migration but fails only when this identity's own
+// legacy state could not be moved, so one bad legacy file cannot block
+// loads and saves for every other service on the host. Files whose identity
+// is unreadable are reported by ListDesired.
+func (s *Store) migrateIdentity(service string, destination string) error {
+	s.migrateMu.Lock()
+	defer s.migrateMu.Unlock()
+	s.runMigrationLocked()
+	return s.migrateErrs[service+"/"+destination]
+}
+
+func (s *Store) runMigrationLocked() {
+	if s.migrated {
+		return
+	}
+	s.migrateErrs, s.migrateOthers = migrateLegacy(s.dir)
+	s.migrated = len(s.migrateErrs) == 0 && s.migrateOthers == nil
+}
+
+func migrateLegacy(dir string) (map[string]error, error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read state directory: %w", err)
+		return nil, fmt.Errorf("read state directory: %w", err)
 	}
-	var errs []error
+	byIdentity := map[string]error{}
+	var others []error
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -84,33 +116,38 @@ func migrateLegacy(dir string) error {
 				Destination string `json:"destination"`
 			}
 			if err := loadJSON(legacy, &identity); err != nil {
-				errs = append(errs, fmt.Errorf("migrate %q: %w", entry.Name(), err))
+				others = append(others, fmt.Errorf("migrate %q: %w", entry.Name(), err))
 				continue
 			}
 			if err := ValidateIdentity(identity.Service, identity.Destination); err != nil {
-				errs = append(errs, fmt.Errorf("migrate %q: %w", entry.Name(), err))
+				others = append(others, fmt.Errorf("migrate %q: %w", entry.Name(), err))
 				continue
 			}
-			target := statePath(dir, identity.Service, identity.Destination, kind)
-			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-				errs = append(errs, err)
-				continue
+			if err := moveLegacy(dir, legacy, identity.Service, identity.Destination, kind); err != nil {
+				key := identity.Service + "/" + identity.Destination
+				byIdentity[key] = errors.Join(byIdentity[key], fmt.Errorf("migrate %q: %w", entry.Name(), err))
 			}
-			if _, err := os.Stat(target); err == nil {
-				// Already migrated; the new layout wins over a stale copy.
-				errs = append(errs, os.Remove(legacy))
-				continue
-			}
-			errs = append(errs, os.Rename(legacy, target))
 		}
 	}
-	return errors.Join(errs...)
+	return byIdentity, errors.Join(others...)
+}
+
+func moveLegacy(dir string, legacy string, service string, destination string, kind string) error {
+	target := statePath(dir, service, destination, kind)
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		return err
+	}
+	if _, err := os.Stat(target); err == nil {
+		// Already migrated; the new layout wins over a stale copy.
+		return os.Remove(legacy)
+	}
+	return os.Rename(legacy, target)
 }
 
 // Forget removes deployment state without touching volume data. Delete desired
 // last so a cleanup failure cannot leave the daemon healing a forgotten service.
 func (s *Store) Forget(service, destination string) error {
-	if err := s.migrate(); err != nil {
+	if err := s.migrateIdentity(service, destination); err != nil {
 		return err
 	}
 	if err := ValidateIdentity(service, destination); err != nil {
@@ -125,7 +162,7 @@ func (s *Store) Forget(service, destination string) error {
 }
 
 func (s *Store) SaveDesired(desired planner.DesiredState) error {
-	if err := s.migrate(); err != nil {
+	if err := s.migrateIdentity(desired.Service, desired.Destination); err != nil {
 		return err
 	}
 	if err := ValidateIdentity(desired.Service, desired.Destination); err != nil {
@@ -135,7 +172,7 @@ func (s *Store) SaveDesired(desired planner.DesiredState) error {
 }
 
 func (s *Store) LoadDesired(service string, destination string) (planner.DesiredState, error) {
-	if err := s.migrate(); err != nil {
+	if err := s.migrateIdentity(service, destination); err != nil {
 		return planner.DesiredState{}, err
 	}
 	if err := ValidateIdentity(service, destination); err != nil {
@@ -200,7 +237,7 @@ func (s *Store) ListDesired() ([]planner.DesiredState, error) {
 }
 
 func (s *Store) SaveActual(actual ActualState) error {
-	if err := s.migrate(); err != nil {
+	if err := s.migrateIdentity(actual.Service, actual.Destination); err != nil {
 		return err
 	}
 	if err := ValidateIdentity(actual.Service, actual.Destination); err != nil {
@@ -210,7 +247,7 @@ func (s *Store) SaveActual(actual ActualState) error {
 }
 
 func (s *Store) LoadActual(service string, destination string) (ActualState, error) {
-	if err := s.migrate(); err != nil {
+	if err := s.migrateIdentity(service, destination); err != nil {
 		return ActualState{}, err
 	}
 	if err := ValidateIdentity(service, destination); err != nil {
@@ -228,7 +265,7 @@ func (s *Store) LoadActual(service string, destination string) (ActualState, err
 }
 
 func (s *Store) SaveLastGood(desired planner.DesiredState) error {
-	if err := s.migrate(); err != nil {
+	if err := s.migrateIdentity(desired.Service, desired.Destination); err != nil {
 		return err
 	}
 	if err := ValidateIdentity(desired.Service, desired.Destination); err != nil {
@@ -238,7 +275,7 @@ func (s *Store) SaveLastGood(desired planner.DesiredState) error {
 }
 
 func (s *Store) LoadLastGood(service string, destination string) (planner.DesiredState, error) {
-	if err := s.migrate(); err != nil {
+	if err := s.migrateIdentity(service, destination); err != nil {
 		return planner.DesiredState{}, err
 	}
 	if err := ValidateIdentity(service, destination); err != nil {

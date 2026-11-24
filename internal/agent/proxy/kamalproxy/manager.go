@@ -21,6 +21,9 @@ const (
 	DefaultContainerName = "serve-proxy"
 	DefaultDeployTimeout = 30 * time.Second
 	DefaultDrainTimeout  = 30 * time.Second
+
+	// restoreGrace bounds a legacy-route restore beyond its deploy timeout.
+	restoreGrace = 10 * time.Second
 )
 
 type Options struct {
@@ -176,8 +179,15 @@ func (m *Manager) apply(ctx context.Context, service string, current routedServi
 		"--deploy-timeout="+formatTimeout(deployTimeout),
 		"--drain-timeout="+formatTimeout(drainTimeout),
 	)
-	if err := m.deploy(ctx, proxyID, service, next.legacyName, cmd); err != nil {
+	migrated, err := m.deploy(ctx, proxyID, service, next.legacyName, cmd, deployTimeout)
+	if err != nil {
 		return err
+	}
+	if !migrated {
+		// Routed under the legacy name; forget the route so the next apply
+		// retries the migration.
+		delete(m.routed, service)
+		return nil
 	}
 	m.routed[service] = next
 	return nil
@@ -188,18 +198,38 @@ func (m *Manager) apply(ctx context.Context, service string, current routedServi
 // host-less catch-all). kamal-proxy rejects the new name with a host
 // conflict in that case, so the legacy route is removed and the deploy
 // retried once. A conflict that remains is a genuine one and is reported.
-func (m *Manager) deploy(ctx context.Context, proxyID runtime.ContainerID, service string, legacyName string, cmd []string) error {
+//
+// kamal-proxy reports a conflict only after the targets pass their health
+// check, so if the retry fails the same command is replayed under the legacy
+// name rather than leaving the hostnames unrouted. That restore ignores
+// cancellation of ctx. It reports migrated=false when the route was left
+// under the legacy name.
+func (m *Manager) deploy(ctx context.Context, proxyID runtime.ContainerID, service string, legacyName string, cmd []string, deployTimeout time.Duration) (bool, error) {
 	_, err := m.runtime.ExecContainer(ctx, proxyID, cmd)
-	if err != nil && legacyName != "" && isHostConflict(err) {
-		if removeErr := m.ensureRouteAbsent(ctx, proxyID, legacyName); removeErr != nil {
-			return errors.Join(fmt.Errorf("kamal-proxy deploy %s: %w", service, err), removeErr)
+	if err == nil {
+		return true, nil
+	}
+	if legacyName == "" || !isHostConflict(err) {
+		return false, fmt.Errorf("kamal-proxy deploy %s: %w", service, err)
+	}
+	removed, removeErr := m.removeRoute(ctx, proxyID, legacyName)
+	if removeErr != nil {
+		return false, errors.Join(fmt.Errorf("kamal-proxy deploy %s: %w", service, err), removeErr)
+	}
+	if _, err := m.runtime.ExecContainer(ctx, proxyID, cmd); err != nil {
+		replaceErr := fmt.Errorf("kamal-proxy deploy %s: %w", service, err)
+		if !removed {
+			return false, replaceErr
 		}
-		_, err = m.runtime.ExecContainer(ctx, proxyID, cmd)
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deployTimeout+restoreGrace)
+		defer cancel()
+		restore := append([]string{cmd[0], cmd[1], legacyName}, cmd[3:]...)
+		if _, restoreErr := m.runtime.ExecContainer(restoreCtx, proxyID, restore); restoreErr != nil {
+			return false, errors.Join(replaceErr, fmt.Errorf("restore legacy route %s: %w", legacyName, restoreErr))
+		}
+		return false, nil
 	}
-	if err != nil {
-		return fmt.Errorf("kamal-proxy deploy %s: %w", service, err)
-	}
-	return nil
+	return true, nil
 }
 
 func isHostConflict(err error) bool {
@@ -212,15 +242,21 @@ func isHostConflict(err error) bool {
 // CLI's specific not-found process exit is idempotent success; Docker failures
 // and other proxy errors must remain failures (and must not be cached).
 func (m *Manager) ensureRouteAbsent(ctx context.Context, id runtime.ContainerID, service string) error {
+	_, err := m.removeRoute(ctx, id, service)
+	return err
+}
+
+// removeRoute reports whether a route was actually removed.
+func (m *Manager) removeRoute(ctx context.Context, id runtime.ContainerID, service string) (bool, error) {
 	_, err := m.runtime.ExecContainer(ctx, id, []string{"kamal-proxy", "remove", service})
 	if err == nil {
-		return nil
+		return true, nil
 	}
 	var exit *runtime.ExecExitError
 	if errors.As(err, &exit) && exit.Code == 1 && strings.TrimSpace(exit.Output) == "Error: service not found" {
-		return nil
+		return false, nil
 	}
-	return fmt.Errorf("kamal-proxy remove %s: %w", service, err)
+	return false, fmt.Errorf("kamal-proxy remove %s: %w", service, err)
 }
 
 func sameRoutedService(a routedService, b routedService) bool {

@@ -256,3 +256,32 @@ func TestLegacyRouteIsMigratedToDestinationScopedName(t *testing.T) {
 		t.Fatalf("route still listed after removal:\n%s", list)
 	}
 }
+
+// kamal-proxy health-checks targets before it reports a host conflict, so an
+// unhealthy candidate fails without the legacy route ever being removed. The
+// migration's restore path relies on this ordering.
+func TestUnhealthyCandidateNeverRemovesTheLegacyRoute(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	f := newProxyFixture(t, ctx)
+	oldName, _ := f.backend("old", "old")
+	// An agent from before destination-scoped names left this route behind.
+	if _, err := f.kamal("deploy", "app-web", "--target="+oldName+":8080", "--host=app.test", "--health-check-path=/"); err != nil {
+		t.Fatal(err)
+	}
+	// The candidate never becomes healthy: nothing listens on its port.
+	candidateName := f.network + "-candidate"
+	f.start(runtime.ContainerSpec{Name: candidateName, Image: "busybox:1.36", Network: f.network, Command: []string{"sleep", "120"}})
+	manager := kamalproxy.New(f.rt, f.options)
+	candidate := proxy.Target{Service: "app", Destination: "production", Role: "web", ContainerName: candidateName, Port: 8080, HealthPath: "/"}
+
+	err := manager.SetTargets(ctx, "app", "production", "web", []proxy.Target{candidate}, proxy.RouteOptions{Hosts: []string{"app.test"}, DeployTimeout: 3 * time.Second})
+
+	if err == nil {
+		t.Fatal("an unhealthy candidate was routed")
+	}
+	if got := f.get("app.test"); got != "old" {
+		list, _ := f.kamal("list")
+		t.Fatalf("app.test after failed migration = %q, want the old app still routed; routes:\n%s", got, list)
+	}
+}
