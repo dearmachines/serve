@@ -22,6 +22,7 @@ type Runtime struct {
 	networks    map[string]runtime.NetworkSpec
 	operations  []string
 	execResults map[string]execResult
+	execQueue   map[string][]execResult
 	baseTime    time.Time
 	defaultIP   string
 	pullErr     error
@@ -39,6 +40,7 @@ func NewRuntime() *Runtime {
 		logs:        map[runtime.ContainerID]string{},
 		networks:    map[string]runtime.NetworkSpec{},
 		execResults: map[string]execResult{},
+		execQueue:   map[string][]execResult{},
 		baseTime:    time.Now(),
 	}
 }
@@ -287,8 +289,21 @@ func (r *Runtime) ExecContainer(ctx context.Context, id runtime.ContainerID, cmd
 		return "", fmt.Errorf("container not running: %s", state.Name)
 	}
 	r.operations = append(r.operations, "exec_container:"+state.Name+":"+strings.Join(cmd, " "))
+	if queued := r.execQueue[state.Name]; len(queued) > 0 {
+		r.execQueue[state.Name] = queued[1:]
+		return queued[0].output, queued[0].err
+	}
 	result := r.execResults[state.Name]
 	return result.output, result.err
+}
+
+// QueueExecResult scripts the next exec result for a container. Queued
+// results are consumed in order before falling back to SetExecResult.
+func (r *Runtime) QueueExecResult(containerName string, output string, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.execQueue[containerName] = append(r.execQueue[containerName], execResult{output: output, err: err})
 }
 
 func (r *Runtime) SetDefaultIPAddress(ip string) {

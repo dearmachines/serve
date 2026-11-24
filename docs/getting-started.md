@@ -5,7 +5,7 @@
 Install from this repository:
 
 ```sh
-git clone https://github.com/uptimenine/serve.git
+git clone https://github.com/dearmachines/serve.git
 cd serve
 go install ./cmd/serve
 ```
@@ -38,14 +38,14 @@ The agent owns its state directory, registry credentials, Docker endpoint, and S
 Start the agent manually for development (use a separate Docker environment from production). In one terminal:
 
 ```sh
-serve agent run --socket /tmp/serve-dev.sock --state-dir .serve/state
+serve agent run --socket .serve/agent.sock --state-dir .serve/state
 ```
 
 In another terminal:
 
 ```sh
-serve deploy --local --host localhost --version dev --socket /tmp/serve-dev.sock
-serve status --socket /tmp/serve-dev.sock
+serve deploy --local --host localhost --version dev --socket .serve/agent.sock
+serve status --socket .serve/agent.sock
 ```
 
 For `deploy --local`, `--host` selects the **manifest identity**, not a connection destination. It defaults to `localhost`; with `hosts: [deploy@app.example.com]`, pass `--host deploy@app.example.com` even while running on that host. Every selected service must have workloads on that identity; use `--service` when needed. `--socket` cannot be combined with remote deployment or the remote `--host`/`status --config` variants.
@@ -297,8 +297,8 @@ retain_containers: 5
 YAML
 
 # First start the development agent in another terminal, as shown above.
-serve deploy --local --config serve.yml --host localhost --version dev --socket /tmp/serve-dev.sock
-serve status --socket /tmp/serve-dev.sock
+serve deploy --local --config serve.yml --host localhost --version dev --socket .serve/agent.sock
+serve status --socket .serve/agent.sock
 ```
 
 Expected status output should include a running container similar to:
@@ -311,7 +311,7 @@ demo     local        web   dev      demo-web-local-dev-r1      running
 Clean up through the same agent before stopping it:
 
 ```sh
-serve remove --service demo --destination local --force --socket /tmp/serve-dev.sock
+serve remove --service demo --destination local --force --socket .serve/agent.sock
 ```
 
 ## Current commands

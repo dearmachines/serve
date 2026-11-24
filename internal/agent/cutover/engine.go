@@ -313,28 +313,7 @@ func (e *Engine) validateAliasOwnership(ctx context.Context, desired planner.Des
 	if err != nil {
 		return err
 	}
-	for _, state := range states {
-		if !state.Running || state.Network != desired.Network {
-			continue
-		}
-		for _, alias := range state.Aliases {
-			role, requestedHere := requested[alias]
-			if !requestedHere {
-				continue
-			}
-			if state.Labels["serve.service"] == desired.Service &&
-				state.Labels["serve.destination"] == desired.Destination &&
-				state.Labels["serve.role"] == role {
-				continue
-			}
-			owner := state.Name
-			if service, ownerRole := state.Labels["serve.service"], state.Labels["serve.role"]; service != "" && ownerRole != "" {
-				owner = service + "/" + ownerRole
-			}
-			return fmt.Errorf("network alias %q is already owned by %s on network %q", alias, owner, desired.Network)
-		}
-	}
-	return nil
+	return reconciler.AliasOwnershipError(states, desired.Network, desired.Service, desired.Destination, requested)
 }
 
 func (e *Engine) deactivateOldAliases(ctx context.Context, desired planner.DesiredState, existing []runtime.ContainerState) error {
@@ -442,6 +421,7 @@ func (e *Engine) switchTraffic(ctx context.Context, desired planner.DesiredState
 	for _, container := range primary {
 		byRole[container.Role] = append(byRole[container.Role], proxy.Target{
 			Service:       desired.Service,
+			Destination:   desired.Destination,
 			Role:          container.Role,
 			ContainerName: container.Name,
 			Port:          healthPort(container),
@@ -457,7 +437,7 @@ func (e *Engine) switchTraffic(ctx context.Context, desired planner.DesiredState
 
 	opts := routeOptions(desired.Proxy)
 	for _, role := range roles {
-		if err := e.deps.Proxy.SetTargets(ctx, desired.Service, role, byRole[role], opts); err != nil {
+		if err := e.deps.Proxy.SetTargets(ctx, desired.Service, desired.Destination, role, byRole[role], opts); err != nil {
 			return err
 		}
 	}
@@ -588,13 +568,16 @@ func healthPolicy(check *planner.Healthcheck) (time.Duration, int) {
 	return interval, retries
 }
 
+// healthTimeout always returns a positive bound: probes run under the
+// reconcile and service locks, so an unconfigured timeout must not let a
+// hanging workload stall the agent.
 func healthTimeout(check *planner.Healthcheck) time.Duration {
 	if check == nil || check.Timeout == "" {
-		return 0
+		return health.DefaultProbeTimeout
 	}
 	timeout, err := time.ParseDuration(check.Timeout)
 	if err != nil || timeout <= 0 {
-		return 0
+		return health.DefaultProbeTimeout
 	}
 	return timeout
 }

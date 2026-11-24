@@ -29,7 +29,7 @@ serve -h
 serve version
 serve init [--path serve.yml] [--force]
 serve status [--config serve.yml | --socket PATH]
-serve logs [--host HOST | --socket PATH] [--container NAME] [--service SERVICE] [--destination DEST] [--role ROLE]
+serve logs [--host HOST | --socket PATH] [--raw] [--container NAME] [--service SERVICE] [--destination DEST] [--role ROLE]
 serve events [--host HOST | --socket PATH] [--once]
 serve doctor [--socket PATH]
 serve remove [--service SERVICE] [--destination DEST] [--role ROLE] --force [--socket PATH]
@@ -40,11 +40,11 @@ serve agent apply <desired.json> [--socket PATH]
 serve agent run [--state-dir DIR] [--socket PATH] [--reconcile-interval 10s]
 serve agent reconcile [--socket PATH]
 serve agent status [--json] [--socket PATH]
-serve agent logs --container NAME [--socket PATH]
+serve agent logs --container NAME [--raw] [--socket PATH]
 serve agent events [--once] [--socket PATH]
 serve deploy [--config serve.yml] [--service SERVICE] [--version VERSION]
 serve deploy --local [--config serve.yml] [--service SERVICE] [--host localhost] [--version dev] [--socket PATH]
-serve exec [--host HOST | --socket PATH] --container NAME -- CMD [ARGS...]
+serve exec [--host HOST | --socket PATH] [--raw] --container NAME -- CMD [ARGS...]
 ```
 
 `serve setup` is not a product requirement. Do not implement it unless the user explicitly changes the scope.
@@ -133,7 +133,7 @@ Create or update a starter config:
 serve init --path serve.yml
 ```
 
-First run `serve agent run --socket /tmp/serve-dev.sock --state-dir .serve/state` in another terminal. Use a separate Docker environment from production; a different state directory does not isolate workloads.
+First run `serve agent run --socket .serve/agent.sock --state-dir .serve/state` in another terminal. Use a separate Docker environment from production; a different state directory does not isolate workloads.
 
 For a local smoke test, use a pullable image:
 
@@ -156,14 +156,14 @@ networking:
 retain_containers: 5
 YAML
 
-serve deploy --local --config serve.yml --host localhost --version dev --socket /tmp/serve-dev.sock
-serve status --socket /tmp/serve-dev.sock
+serve deploy --local --config serve.yml --host localhost --version dev --socket .serve/agent.sock
+serve status --socket .serve/agent.sock
 ```
 
 Clean up:
 
 ```sh
-serve remove --service demo --destination local --force --socket /tmp/serve-dev.sock
+serve remove --service demo --destination local --force --socket .serve/agent.sock
 ```
 
 ### Container commands

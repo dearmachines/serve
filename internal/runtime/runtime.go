@@ -39,17 +39,26 @@ type Runtime interface {
 }
 
 type ContainerSpec struct {
-	Name     string
-	Image    string
-	Command  []string
-	Labels   map[string]string
-	Env      map[string]string
-	EnvFiles []string
-	Restart  RestartPolicy
-	Ports    []Port
-	Network  string
-	Aliases  []string
-	Volumes  []string
+	Name      string
+	Image     string
+	Command   []string
+	Labels    map[string]string
+	Env       map[string]string
+	EnvFiles  []string
+	Restart   RestartPolicy
+	Ports     []Port
+	Network   string
+	Aliases   []string
+	Volumes   []string
+	Resources Resources
+}
+
+// Resources are per-container limits; zero fields fall back to runtime
+// defaults (unlimited memory and CPU, a default PID limit).
+type Resources struct {
+	MemoryBytes int64
+	NanoCPUs    int64
+	PidsLimit   int64
 }
 
 type RestartPolicy struct {

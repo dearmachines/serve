@@ -33,6 +33,7 @@ type Command struct {
 	sshRunner      SSHRunner
 	socketPath     string
 	socketExplicit bool
+	isTerminal     func(io.Writer) bool
 }
 
 type Runner interface {
@@ -53,6 +54,7 @@ func New(version string, opts ...Option) *Command {
 		socketPath: daemon.DefaultSocketPath,
 		runner:     execRunner{},
 		sshRunner:  execSSHRunner{},
+		isTerminal: isTerminal,
 	}
 	for _, opt := range opts {
 		opt(cmd)
@@ -79,6 +81,9 @@ func WithSSHRunner(runner SSHRunner) Option {
 }
 
 func (c *Command) Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
+	// Error text can carry workload bytes (exec exit output, remote stderr
+	// over SSH), so it is sanitized on a terminal like workload output.
+	stderr = workloadOutput(stderr, false, c.isTerminal)
 	if len(args) == 0 {
 		printHelp(stderr)
 		return 1
@@ -231,6 +236,8 @@ func (c *Command) remoteStatus(ctx context.Context, configPath string, stdout io
 }
 
 func (c *Command) runLogs(ctx context.Context, args []string, stdout io.Writer) error {
+	raw, args := takeRawFlag(args)
+	stdout = workloadOutput(stdout, raw, c.isTerminal)
 	host, rest, err := parseHostFlag("serve logs", args)
 	if err != nil {
 		return err
@@ -327,6 +334,8 @@ func (c *Command) runEvents(ctx context.Context, args []string, stdout io.Writer
 
 // runExec always asks the host agent to execute the command.
 func (c *Command) runExec(ctx context.Context, args []string, stdout io.Writer) error {
+	raw, args := takeRawFlag(args)
+	stdout = workloadOutput(stdout, raw, c.isTerminal)
 	host := ""
 	container := ""
 	var command []string
@@ -720,8 +729,7 @@ func agentSocketRequestWithBody(ctx context.Context, socketPath string, method s
 	client := &http.Client{Transport: &http.Transport{
 		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, _ string, _ string) (net.Conn, error) {
-			var dialer net.Dialer
-			return dialer.DialContext(ctx, "unix", socketPath)
+			return dialVerifiedAgent(ctx, socketPath, trustedAgentUIDs())
 		},
 	}}
 	request, err := http.NewRequestWithContext(ctx, method, "http://serve-agent"+path, body)
@@ -849,6 +857,8 @@ func runAgentStatus(ctx context.Context, args []string, stdout io.Writer) error 
 }
 
 func runAgentLogs(ctx context.Context, args []string, stdout io.Writer) error {
+	raw, args := takeRawFlag(args)
+	stdout = workloadOutput(stdout, raw, isTerminal)
 	socketPath, rest, err := parseSocketFlag("serve agent logs", args)
 	if err != nil {
 		return err
@@ -1226,6 +1236,9 @@ Local operations require a running agent: --socket PATH overrides
 /run/serve/agent.sock. There is no direct-Docker or standalone fallback.
 Only agent run accepts --state-dir. Local deploy --host selects a manifest host.
 Remote variants: status --config, logs --host, events --host, exec --host.
+On a terminal, logs and exec output has control characters made visible
+(ESC as ^[) so a workload cannot rewrite the screen or clipboard; pass --raw
+for byte-exact output.
 
 Not implemented yet:
   setup             Prepare a remote VM

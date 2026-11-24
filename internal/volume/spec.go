@@ -9,6 +9,9 @@ import (
 
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
+// ReservedPrefix marks named volumes owned by Serve.
+const ReservedPrefix = "serve-"
+
 type Spec struct {
 	Source   string
 	Target   string
@@ -52,6 +55,11 @@ func ValidateAll(raw []string) error {
 		spec, err := Parse(value)
 		if err != nil {
 			return err
+		}
+		// serve-* named volumes belong to Serve itself (serve-proxy-data holds
+		// the proxy's routes and TLS state); workloads must not mount them.
+		if !path.IsAbs(spec.Source) && strings.HasPrefix(spec.Source, ReservedPrefix) {
+			return fmt.Errorf("volume name %q is reserved for Serve (names starting with %q)", spec.Source, ReservedPrefix)
 		}
 		if targets[spec.Target] {
 			return fmt.Errorf("target %q is configured more than once", spec.Target)

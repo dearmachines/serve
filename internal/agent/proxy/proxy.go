@@ -7,6 +7,7 @@ import (
 
 type Target struct {
 	Service       string
+	Destination   string
 	Role          string
 	ContainerName string
 	Port          int
@@ -26,7 +27,7 @@ type RouteOptions struct {
 type Manager interface {
 	AddTarget(ctx context.Context, target Target) error
 	RemoveTarget(ctx context.Context, target Target) error
-	// SetTargets atomically replaces the routed target set for a
-	// service role. An empty set unroutes the role entirely.
-	SetTargets(ctx context.Context, service string, role string, targets []Target, opts RouteOptions) error
+	// SetTargets atomically replaces the routed target set for a role of
+	// one service destination. An empty set unroutes the role entirely.
+	SetTargets(ctx context.Context, service string, destination string, role string, targets []Target, opts RouteOptions) error
 }
