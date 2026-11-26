@@ -842,7 +842,12 @@ func runAgentStatus(ctx context.Context, args []string, stdout io.Writer) error 
 	fmt.Fprintln(writer, "SERVICE\tDESTINATION\tROLE\tVERSION\tCONTAINER\tSTATUS")
 	for _, state := range states {
 		for _, container := range state.Containers {
-			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n", state.Service, state.Destination, container.Role, container.Version, container.Name, container.Status)
+			// Dependencies are not tied to an application version.
+			version := container.Version
+			if version == "" {
+				version = "-"
+			}
+			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n", state.Service, state.Destination, container.Role, version, container.Name, container.Status)
 		}
 	}
 	return writer.Flush()

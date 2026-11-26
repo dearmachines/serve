@@ -93,6 +93,10 @@ type GitState struct {
 	Dirty bool
 }
 
+// dependencyNameHashLength is how much of a dependency's spec hash appears in
+// its container name.
+const dependencyNameHashLength = 12
+
 var namePartPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 func Plan(cfg config.Config, opts Options) (DesiredState, error) {
@@ -188,8 +192,10 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 			continue
 		}
 
+		// A dependency has its own lifecycle: it is identified by its spec,
+		// not by the application version, so an unchanged dependency plans to
+		// the same container on every deploy and keeps running.
 		container := Container{
-			Name:          containerName(cfg.Service, name, destination, opts.Version, 1),
 			Role:          name,
 			ContainerType: "accessory",
 			Image:         dependency.Image,
@@ -199,7 +205,7 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 			Aliases:       append([]string(nil), dependency.Aliases...),
 			Volumes:       append([]string(nil), dependency.Volumes...),
 			Env:           copyStringMap(dependency.Env.Plain),
-			Labels:        labels(cfg.Service, destination, name, opts.Version, 1, "accessory"),
+			Labels:        labels(cfg.Service, destination, name, "", 1, "accessory"),
 		}
 		if dependency.InternalPort > 0 {
 			port := Port{Name: "tcp", ContainerPort: dependency.InternalPort}
@@ -213,7 +219,11 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 			container.Ports = []Port{port}
 		}
 		applySecrets(&container, dependency.Env, cfg.Secrets, opts)
-		container.Labels["serve.spec_hash"] = specHash(container, state.Network, state.SecretsFile)
+		// The hash is taken before the name is set because the name is
+		// derived from it.
+		hash := specHash(container, state.Network, state.SecretsFile)
+		container.Labels["serve.spec_hash"] = hash
+		container.Name = containerName(cfg.Service, name, destination, hash[:dependencyNameHashLength], 1)
 		state.Containers = append(state.Containers, container)
 	}
 
@@ -427,13 +437,16 @@ func durationString(duration config.Duration) string {
 }
 
 func labels(service string, destination string, role string, version string, replica int, containerType string) map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		"serve.managed":        "true",
 		"serve.service":        service,
 		"serve.destination":    destination,
 		"serve.role":           role,
-		"serve.version":        version,
 		"serve.replica":        strconv.Itoa(replica),
 		"serve.container_type": containerType,
 	}
+	if version != "" {
+		labels["serve.version"] = version
+	}
+	return labels
 }

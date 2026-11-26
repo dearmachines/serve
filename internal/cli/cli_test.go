@@ -1415,17 +1415,16 @@ dependencies:
 		t.Fatalf("rollback exit code = %d", exitCode)
 	}
 
+	var running []runtime.ContainerState
 	for _, container := range listManagedContainers(t, rt) {
-		if container.Labels["serve.container_type"] != "accessory" || container.Labels["serve.version"] != "v1" || !container.Running {
-			continue
+		if container.Labels["serve.container_type"] == "accessory" && container.Running {
+			running = append(running, container)
 		}
-		want := []string{"redis-server", "--appendonly", "no"}
-		if !reflect.DeepEqual(container.Command, want) {
-			t.Fatalf("rolled-back dependency command = %#v, want %#v", container.Command, want)
-		}
-		return
 	}
-	t.Fatalf("previous dependency version is not running after rollback: %#v", listManagedContainers(t, rt))
+	want := []string{"redis-server", "--appendonly", "no"}
+	if len(running) != 1 || !reflect.DeepEqual(running[0].Command, want) {
+		t.Fatalf("running dependencies after rollback = %#v, want only the previous command %#v", running, want)
+	}
 }
 
 func TestRollbackAppliesLastGoodState(t *testing.T) {
