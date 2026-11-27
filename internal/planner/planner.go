@@ -177,7 +177,7 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 				container.Ports = []Port{{Name: "http", ContainerPort: server.AppPort}}
 			}
 			applySecrets(&container, cfg.Env, cfg.Secrets, opts)
-			container.Labels["serve.spec_hash"] = specHash(container, state.Network, state.SecretsFile)
+			container.Labels["serve.spec_hash"] = specHash(container, specOwner{}, state.Network, state.SecretsFile)
 			state.Containers = append(state.Containers, container)
 		}
 	}
@@ -220,8 +220,9 @@ func Plan(cfg config.Config, opts Options) (DesiredState, error) {
 		}
 		applySecrets(&container, dependency.Env, cfg.Secrets, opts)
 		// The hash is taken before the name is set because the name is
-		// derived from it.
-		hash := specHash(container, state.Network, state.SecretsFile)
+		// derived from it. It covers the owner because the hyphen-joined name
+		// alone cannot tell a/db/db-prod from a-db/db/prod.
+		hash := specHash(container, specOwner{Service: cfg.Service, Destination: destination}, state.Network, state.SecretsFile)
 		container.Labels["serve.spec_hash"] = hash
 		container.Name = containerName(cfg.Service, name, destination, hash[:dependencyNameHashLength], 1)
 		state.Containers = append(state.Containers, container)
@@ -338,16 +339,25 @@ func applySecrets(container *Container, env config.EnvConfig, secrets config.Sec
 	}
 }
 
-func specHash(container Container, network string, secretsFile string) string {
+// specOwner identifies the service and destination a hashed container belongs
+// to. Application containers leave it empty: their names carry the version.
+type specOwner struct {
+	Service     string `json:"service,omitempty"`
+	Destination string `json:"destination,omitempty"`
+}
+
+func specHash(container Container, owner specOwner, network string, secretsFile string) string {
 	container.Labels = nil
 	secretValues, invalidSecretsFile := secretValuesForHash(container.SecretNames, secretsFile)
 	encoded, err := json.Marshal(struct {
 		Container          Container         `json:"container"`
+		Owner              specOwner         `json:"owner,omitzero"`
 		Network            string            `json:"network"`
 		SecretValues       map[string]string `json:"secret_values,omitempty"`
 		InvalidSecretsFile string            `json:"invalid_secrets_file,omitempty"`
 	}{
 		Container:          container,
+		Owner:              owner,
 		Network:            network,
 		SecretValues:       secretValues,
 		InvalidSecretsFile: invalidSecretsFile,

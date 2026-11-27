@@ -28,6 +28,8 @@ type Runtime interface {
 	CreateContainer(ctx context.Context, spec ContainerSpec) (ContainerID, error)
 	StartContainer(ctx context.Context, id ContainerID) error
 	StopContainer(ctx context.Context, id ContainerID, timeout time.Duration) error
+	// SetRestartPolicy changes the restart policy of an existing container.
+	SetRestartPolicy(ctx context.Context, id ContainerID, policy RestartPolicy) error
 	RemoveContainer(ctx context.Context, id ContainerID) error
 	InspectContainer(ctx context.Context, id ContainerID) (ContainerState, error)
 	ListContainers(ctx context.Context, filters ContainerFilters) ([]ContainerState, error)

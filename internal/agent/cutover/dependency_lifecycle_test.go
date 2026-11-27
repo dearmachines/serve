@@ -2,16 +2,19 @@ package cutover_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/uptimenine/serve/internal/agent/cutover"
 	"github.com/uptimenine/serve/internal/agent/health"
 	"github.com/uptimenine/serve/internal/agent/reconciler"
 	"github.com/uptimenine/serve/internal/planner"
 	"github.com/uptimenine/serve/internal/runtime"
+	fakeruntime "github.com/uptimenine/serve/internal/runtime/fake"
 )
 
 // dependency builds a dependency the way the planner does: named by its spec
@@ -263,5 +266,121 @@ func TestReapplyingPreviousStateRestoresPreviousDependencySpec(t *testing.T) {
 	}
 	if state := env.mustContainer(t, statefulDependency("postgres", "17").Name); state.Running {
 		t.Fatalf("newer dependency spec is still running after rollback: %+v", state)
+	}
+}
+
+func dockerRestartedDependency(role string, spec string) planner.Container {
+	container := statefulDependency(role, spec)
+	container.Restart = planner.Restart{Controller: "docker", Policy: "always"}
+	return container
+}
+
+// Docker's "always" policy restarts a stopped container when the daemon
+// restarts, which would bring a retained dependency back next to its
+// replacement on the same volume.
+func TestRetainedDependencyIsNotRestartedByDocker(t *testing.T) {
+	env := newEnv(t)
+	previous := desiredWith("abc123", dockerRestartedDependency("postgres", "16"))
+	env.apply(t, previous)
+	replacement := dockerRestartedDependency("postgres", "17")
+	env.apply(t, desiredWith("def456", replacement))
+
+	retained := env.mustContainer(t, dockerRestartedDependency("postgres", "16").Name)
+	if retained.Running || retained.Restart.Policy != "no" {
+		t.Fatalf("retained dependency can be restarted by Docker: running=%v restart=%+v", retained.Running, retained.Restart)
+	}
+	if active := env.mustContainer(t, replacement.Name); active.Restart.Policy != "always" {
+		t.Fatalf("active dependency restart policy = %+v, want always", active.Restart)
+	}
+
+	env.apply(t, previous)
+
+	reactivated := env.mustContainer(t, dockerRestartedDependency("postgres", "16").Name)
+	if !reactivated.Running || reactivated.Restart.Policy != "always" {
+		t.Fatalf("reactivated dependency lost its restart policy: running=%v restart=%+v", reactivated.Running, reactivated.Restart)
+	}
+	if retired := env.mustContainer(t, replacement.Name); retired.Restart.Policy != "no" {
+		t.Fatalf("retired dependency restart policy = %+v, want no", retired.Restart)
+	}
+}
+
+// cancelAwareRuntime refuses work on a done context, as the Docker client does.
+type cancelAwareRuntime struct {
+	*fakeruntime.Runtime
+}
+
+func (r *cancelAwareRuntime) ListContainers(ctx context.Context, filters runtime.ContainerFilters) ([]runtime.ContainerState, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return r.Runtime.ListContainers(ctx, filters)
+}
+
+func (r *cancelAwareRuntime) StartContainer(ctx context.Context, id runtime.ContainerID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.Runtime.StartContainer(ctx, id)
+}
+
+func (r *cancelAwareRuntime) StopContainer(ctx context.Context, id runtime.ContainerID, timeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.Runtime.StopContainer(ctx, id, timeout)
+}
+
+func (r *cancelAwareRuntime) RemoveContainer(ctx context.Context, id runtime.ContainerID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.Runtime.RemoveContainer(ctx, id)
+}
+
+// cancelingStarter simulates the deploy client disconnecting while the
+// engine starts its cancelAt-th container.
+type cancelingStarter struct {
+	delegate *reconciler.Reconciler
+	cancel   context.CancelFunc
+	calls    int
+	cancelAt int
+}
+
+func (s *cancelingStarter) EnsureContainer(ctx context.Context, desired planner.DesiredState, container planner.Container) (reconciler.EnsureResult, error) {
+	s.calls++
+	if s.calls == s.cancelAt {
+		s.cancel()
+		return reconciler.EnsureResult{}, ctx.Err()
+	}
+	return s.delegate.EnsureContainer(ctx, desired, container)
+}
+
+func TestClientDisconnectAfterStoppingStatefulDependencyRestartsPrevious(t *testing.T) {
+	env := newEnv(t)
+	previous := statefulDependency("postgres", "16")
+	env.apply(t, desiredWith("abc123", previous))
+	previousState := env.mustContainer(t, previous.Name)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt := &cancelAwareRuntime{Runtime: env.rt}
+	starter := &cancelingStarter{delegate: reconciler.New(rt), cancel: cancel, cancelAt: 2}
+	engine := cutover.New(cutover.Deps{
+		Runtime: rt, Starter: starter, Health: env.checker,
+		Proxy: env.proxy, LastGood: env.store, Sleeper: noopSleeper{},
+	})
+	candidate := desiredWith("def456", statefulDependency("postgres", "17"))
+	env.checker.SetStatus(candidate.Containers[0].Name, health.Healthy)
+
+	err := engine.Apply(ctx, candidate)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Apply error = %v, want context cancellation", err)
+	}
+	if state := env.mustContainer(t, previous.Name); state.ID != previousState.ID || !state.Running {
+		t.Fatalf("previous dependency is not running after the client disconnected: %+v", state)
+	}
+	if candidates := env.containersByVersion(t, "def456"); len(candidates) != 0 {
+		t.Fatalf("candidate containers were left behind after the client disconnected: %+v", candidates)
 	}
 }

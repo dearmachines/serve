@@ -26,6 +26,9 @@ const (
 	defaultHealthInterval = 2 * time.Second
 	defaultHealthRetries  = 10
 	stopTimeout           = 10 * time.Second
+	// failureCleanupTimeout bounds each cleanup step of a failed deploy,
+	// which must run even when the deploy request itself was canceled.
+	failureCleanupTimeout = time.Minute
 )
 
 type Starter interface {
@@ -86,11 +89,10 @@ func (e *Engine) Apply(ctx context.Context, desired planner.DesiredState) error 
 
 	created, err := e.startCandidates(ctx, desired, primary)
 	if err != nil {
-		return errors.Join(err, e.removeContainers(ctx, desired, created))
+		return e.failApply(ctx, desired, created, nil, err)
 	}
 	if err := e.waitForHealth(ctx, desired, primary); err != nil {
-		cleanupErr := e.removeContainers(ctx, desired, created)
-		return errors.Join(err, cleanupErr)
+		return e.failApply(ctx, desired, created, nil, err)
 	}
 
 	stoppedPredecessors, err := e.stopExclusivePredecessors(ctx, desired, dependents, existing)
@@ -282,11 +284,21 @@ func markStopped(existing []runtime.ContainerState, stopped []runtime.ContainerS
 	}
 }
 
+// failApply removes the candidates a failed deploy created and restarts the
+// predecessors it stopped. A client that disconnects cancels ctx, so the
+// cleanup runs on its own bounded contexts: otherwise a stopped stateful
+// dependency would stay down. The restart has a separate budget so slow
+// candidate removal cannot use it up.
 func (e *Engine) failApply(ctx context.Context, desired planner.DesiredState, created []planner.Container, stopped []runtime.ContainerState, cause error) error {
-	cleanupErr := e.removeContainers(ctx, desired, created)
+	removeCtx, cancelRemove := context.WithTimeout(context.WithoutCancel(ctx), failureCleanupTimeout)
+	cleanupErr := e.removeContainers(removeCtx, desired, created)
+	cancelRemove()
+
+	restoreCtx, cancelRestore := context.WithTimeout(context.WithoutCancel(ctx), failureCleanupTimeout)
+	defer cancelRestore()
 	var restoreErrors []error
 	for _, state := range stopped {
-		if err := e.deps.Runtime.StartContainer(ctx, state.ID); err != nil {
+		if err := e.deps.Runtime.StartContainer(restoreCtx, state.ID); err != nil {
 			restoreErrors = append(restoreErrors, fmt.Errorf("restart previous container %s: %w", state.Name, err))
 		}
 	}
@@ -584,7 +596,11 @@ func (e *Engine) retireOldVersions(ctx context.Context, desired planner.DesiredS
 }
 
 // retire stops every given container and removes those whose generation is
-// not among the newest retained ones.
+// not among the newest retained ones. A retained dependency also loses its
+// Docker restart policy: Docker restarts a stopped "always" container when
+// the daemon restarts, which would run it next to its replacement on the same
+// volume or host port. Reactivating a retained spec recreates its container,
+// which restores the configured policy.
 func (e *Engine) retire(ctx context.Context, desired planner.DesiredState, states []runtime.ContainerState, generation func(runtime.ContainerState) string) error {
 	byGeneration := map[string][]runtime.ContainerState{}
 	for _, state := range states {
@@ -619,6 +635,12 @@ func (e *Engine) retire(ctx context.Context, desired planner.DesiredState, state
 			if index >= keepOld {
 				if err := e.deps.Runtime.RemoveContainer(ctx, state.ID); err != nil {
 					return err
+				}
+				continue
+			}
+			if isDependency(state) && state.Restart.Policy != "" && state.Restart.Policy != "no" {
+				if err := e.deps.Runtime.SetRestartPolicy(ctx, state.ID, runtime.RestartPolicy{Policy: "no"}); err != nil {
+					return fmt.Errorf("disable restart policy of retained container %s: %w", state.Name, err)
 				}
 			}
 		}

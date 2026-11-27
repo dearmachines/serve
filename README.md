@@ -408,10 +408,12 @@ Environment secrets ultimately become Docker environment variables and are visib
 
 ### Complete application and PostgreSQL example
 
-> **Dependency lifecycle:** a dependency is separate from the application version. A deploy keeps a dependency's container running when its configuration (image reference, command, environment, secret values, ports, volumes, aliases, restart policy, and network) is unchanged, and replaces it only when that configuration changes.
+> **Dependency lifecycle:** a dependency is separate from the application version. A deploy keeps a dependency's container running when its configuration (image reference, command, environment, encrypted secret values, ports, volumes, aliases, restart policy, and network) is unchanged, and replaces it only when that configuration changes.
 >
-> - A changed dependency with a volume or a published host port is stopped before its replacement starts, so it is briefly unavailable. A changed dependency with neither is replaced without a gap through its network aliases.
+> - A changed dependency with a volume or a published host port is stopped before its replacement starts, so it is briefly unavailable. A changed dependency with neither is replaced by starting the new container and moving the network aliases to it before the previous container stops. Serve does not check that the replacement is ready to accept connections, so clients should retry transient connection failures.
 > - An image tag that moves, such as `postgres:16`, is not pulled again while the configuration is unchanged. Pin a digest or change the tag to roll out a new image.
+> - Secrets are compared as SOPS ciphertext, because the deploying machine never decrypts them. Re-encrypting an unchanged value with a new data key counts as a configuration change and replaces every dependency that references it.
+> - A retained container of an earlier configuration has its Docker restart policy disabled, so a Docker daemon restart cannot bring it back next to the active one.
 > - `serve rollback` restores the previous configuration of a dependency that changed in the rolled-back deploy. Volume contents are not rolled back, so a database image downgrade can fail on data that the newer image already upgraded.
 > - `retain_containers` keeps the stopped containers of a dependency's earlier configurations, counted per dependency.
 > - Dependencies created by earlier Serve releases carry an application version and are replaced once by the first deploy after upgrading. Upgrade the Serve agent on every host before deploying with the upgraded CLI: an older agent replaces dependencies planned by a newer CLI on every deploy.

@@ -597,3 +597,43 @@ func removeNetwork(t *testing.T, rt *dockerruntime.Runtime, name string) {
 		t.Logf("remove network %s: %v", name, err)
 	}
 }
+
+func TestDockerRuntimeSetsRestartPolicyOnStoppedContainer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rt := newDockerRuntime(t)
+	name := testContainerName(t, "set-restart-policy")
+
+	if err := rt.PullImage(ctx, testImage); err != nil {
+		t.Fatalf("pull image: %v", err)
+	}
+	id, err := rt.CreateContainer(ctx, runtime.ContainerSpec{
+		Name:    name,
+		Image:   testImage,
+		Command: []string{"sh", "-c", "sleep 60"},
+		Restart: runtime.RestartPolicy{Policy: "always"},
+		Labels:  map[string]string{"serve.integration_test": t.Name()},
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	defer removeContainer(t, rt, id)
+	if err := rt.StartContainer(ctx, id); err != nil {
+		t.Fatalf("start container: %v", err)
+	}
+	if err := rt.StopContainer(ctx, id, time.Second); err != nil {
+		t.Fatalf("stop container: %v", err)
+	}
+
+	if err := rt.SetRestartPolicy(ctx, id, runtime.RestartPolicy{Policy: "no"}); err != nil {
+		t.Fatalf("set restart policy: %v", err)
+	}
+
+	state, err := rt.InspectContainer(ctx, id)
+	if err != nil {
+		t.Fatalf("inspect container: %v", err)
+	}
+	if state.Running || state.Restart.Policy != "no" {
+		t.Fatalf("container running=%v restart=%+v, want stopped with policy no", state.Running, state.Restart)
+	}
+}

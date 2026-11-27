@@ -125,3 +125,27 @@ func TestPlanKeepsApplicationContainersVersioned(t *testing.T) {
 		t.Fatalf("application container lost its version identity: %#v", web)
 	}
 }
+
+// Service, role, and destination are joined with hyphens in a container name,
+// so different owners can spell the same prefix.
+func TestPlanNamesIdenticalDependenciesOfDifferentOwnersDifferently(t *testing.T) {
+	plan := func(service string, destination string) planner.Container {
+		t.Helper()
+		cfg := dependencyLifecycleConfig()
+		cfg.Service = service
+		cfg.Destination = destination
+		cfg.Dependencies = map[string]config.DependencyConfig{
+			"db": {Image: "postgres:16-alpine", Hosts: []string{"app1.example.com"}},
+		}
+		return planDependency(t, cfg, "abc123")
+	}
+
+	first := plan("a", "db-prod")
+	second := plan("a-db", "prod")
+
+	if first.Name == second.Name {
+		t.Fatalf("dependencies of %s/%s and %s/%s share container name %q",
+			first.Labels["serve.service"], first.Labels["serve.destination"],
+			second.Labels["serve.service"], second.Labels["serve.destination"], first.Name)
+	}
+}
