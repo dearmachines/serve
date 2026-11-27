@@ -114,6 +114,16 @@ func (r *Runtime) StopContainer(ctx context.Context, id runtime.ContainerID, tim
 	return err
 }
 
+func (r *Runtime) SetRestartPolicy(ctx context.Context, id runtime.ContainerID, policy runtime.RestartPolicy) error {
+	_, err := r.client.ContainerUpdate(ctx, string(id), container.UpdateConfig{
+		RestartPolicy: container.RestartPolicy{
+			Name:              container.RestartPolicyMode(policy.Policy),
+			MaximumRetryCount: policy.MaxAttempts,
+		},
+	})
+	return err
+}
+
 func (r *Runtime) RemoveContainer(ctx context.Context, id runtime.ContainerID) error {
 	err := r.client.ContainerRemove(ctx, string(id), container.RemoveOptions{Force: true})
 	if errdefs.IsNotFound(err) {

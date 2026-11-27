@@ -245,7 +245,7 @@ Each entry uses `source:/absolute/container/path` with an optional `:ro` or `:rw
 
 Named volumes are local to each Docker host and survive container replacement, `serve remove`, `serve prune`, and rollback. Serve does not delete volume data, and rollback restores container configuration rather than previous volume contents. Use service-qualified volume names to avoid accidental sharing between configurations on the same host.
 
-Replicas and blue-green versions that use the same named volume access the same data concurrently. In particular, versioned dependencies can briefly overlap during deployment, so a volume mount alone does not provide a safe zero-downtime database lifecycle.
+Application replicas and blue-green versions that use the same named volume access the same data concurrently. A dependency with a volume never overlaps with its replacement: an unchanged dependency keeps running across deploys, and a changed one is stopped before its replacement starts.
 
 ## Private images
 
@@ -408,7 +408,17 @@ Environment secrets ultimately become Docker environment variables and are visib
 
 ### Complete application and PostgreSQL example
 
-> **Stateful dependency lifecycle:** dependencies currently follow application versions during deploy and retention. The example below demonstrates environment and secret configuration, but Serve does not yet provide a database-specific upgrade or zero-downtime lifecycle. Use an externally managed database when that lifecycle is required.
+> **Dependency lifecycle:** a dependency is separate from the application version. A deploy keeps a dependency's container running when its configuration (image reference, command, environment, encrypted secret values, ports, volumes, aliases, restart policy, and network) is unchanged, and replaces it only when that configuration changes.
+>
+> - A changed dependency with a volume or a published host port is stopped before its replacement starts, so it is briefly unavailable. A changed dependency with neither is replaced by starting the new container and moving the network aliases to it before the previous container stops. Serve does not check that the replacement is ready to accept connections, so clients should retry transient connection failures.
+> - An image tag that moves, such as `postgres:16`, is not pulled again while the configuration is unchanged. Pin a digest or change the tag to roll out a new image.
+> - Secrets are compared as SOPS ciphertext, because the deploying machine never decrypts them. Re-encrypting an unchanged value with a new data key counts as a configuration change and replaces every dependency that references it.
+> - A retained container of an earlier configuration has its Docker restart policy disabled, so a Docker daemon restart cannot bring it back next to the active one.
+> - `serve rollback` restores the previous configuration of a dependency that changed in the rolled-back deploy. Volume contents are not rolled back, so a database image downgrade can fail on data that the newer image already upgraded.
+> - `retain_containers` keeps the stopped containers of a dependency's earlier configurations, counted per dependency.
+> - Dependencies created by earlier Serve releases carry an application version and are replaced once by the first deploy after upgrading. Upgrade the Serve agent on every host before deploying with the upgraded CLI: an older agent replaces dependencies planned by a newer CLI on every deploy.
+>
+> Serve does not provide a database-specific upgrade or zero-downtime lifecycle. Use an externally managed database when that lifecycle is required.
 
 ```yaml
 service: billing
@@ -490,7 +500,7 @@ dependencies:
 
 `publish.host_port` is required when `publish` is present. `publish.host_ip` defaults to `127.0.0.1`; reaching the dependency through a private VM address requires explicitly setting that address. Binding every interface requires the explicit value `0.0.0.0`. Omitting `publish` never creates a host-port binding.
 
-Serve validates the container port, host port, and host IP before contacting a deployment host. The declared binding is part of desired state, so reconciliation and rollback preserve it. Because two containers cannot own the same host binding, a deploy or rollback briefly stops the previous version of a published dependency before starting its replacement; clients should retry transient connection failures.
+Serve validates the container port, host port, and host IP before contacting a deployment host. The declared binding is part of desired state, so reconciliation and rollback preserve it. An unchanged published dependency keeps running across deploys. Because two containers cannot own the same host binding, a deploy or rollback that changes a published dependency briefly stops the previous container before starting its replacement; clients should retry transient connection failures.
 
 Serve does not install or configure host/cloud firewalls, authentication, TLS, credentials, or host networking. Those remain operator responsibilities; expose a dependency beyond loopback only inside an independently secured network boundary.
 

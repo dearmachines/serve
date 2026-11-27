@@ -26,6 +26,9 @@ const (
 	defaultHealthInterval = 2 * time.Second
 	defaultHealthRetries  = 10
 	stopTimeout           = 10 * time.Second
+	// failureCleanupTimeout bounds each cleanup step of a failed deploy,
+	// which must run even when the deploy request itself was canceled.
+	failureCleanupTimeout = time.Minute
 )
 
 type Starter interface {
@@ -86,37 +89,36 @@ func (e *Engine) Apply(ctx context.Context, desired planner.DesiredState) error 
 
 	created, err := e.startCandidates(ctx, desired, primary)
 	if err != nil {
-		return errors.Join(err, e.removeContainers(ctx, desired, created))
+		return e.failApply(ctx, desired, created, nil, err)
 	}
 	if err := e.waitForHealth(ctx, desired, primary); err != nil {
-		cleanupErr := e.removeContainers(ctx, desired, created)
-		return errors.Join(err, cleanupErr)
+		return e.failApply(ctx, desired, created, nil, err)
 	}
 
-	stoppedPortOwners, err := e.stopPublishedPortOwners(ctx, desired, dependents, existing)
+	stoppedPredecessors, err := e.stopExclusivePredecessors(ctx, desired, dependents, existing)
 	if err != nil {
-		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
+		return e.failApply(ctx, desired, created, stoppedPredecessors, err)
 	}
-	markStopped(existing, stoppedPortOwners)
+	markStopped(existing, stoppedPredecessors)
 
 	createdDependents, err := e.startCandidates(ctx, desired, dependents)
 	created = append(created, createdDependents...)
 	if err != nil {
-		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
+		return e.failApply(ctx, desired, created, stoppedPredecessors, err)
 	}
 	if err := e.waitForHealth(ctx, desired, aliasedContainers(dependents)); err != nil {
-		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
+		return e.failApply(ctx, desired, created, stoppedPredecessors, err)
 	}
 
 	if err := e.activateAliases(ctx, desired); err != nil {
-		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
+		return e.failApply(ctx, desired, created, stoppedPredecessors, err)
 	}
 	if err := e.waitForHealth(ctx, desired, aliasedContainers(desired.Containers)); err != nil {
-		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
+		return e.failApply(ctx, desired, created, stoppedPredecessors, err)
 	}
 
 	if err := e.switchTraffic(ctx, desired, primary); err != nil {
-		return e.failApply(ctx, desired, created, stoppedPortOwners, err)
+		return e.failApply(ctx, desired, created, stoppedPredecessors, err)
 	}
 	// Traffic has switched: the deploy is committed, so cleanup failures on
 	// the old version must not tear down the now-live candidate containers.
@@ -207,27 +209,63 @@ func (e *Engine) startCandidates(ctx context.Context, desired planner.DesiredSta
 	return created, nil
 }
 
-func (e *Engine) stopPublishedPortOwners(ctx context.Context, desired planner.DesiredState, candidates []planner.Container, existing []runtime.ContainerState) ([]runtime.ContainerState, error) {
-	publishedRoles := map[string]bool{}
-	for _, container := range candidates {
-		for _, port := range container.Ports {
-			if port.HostPort > 0 {
-				publishedRoles[container.Role] = true
-				break
-			}
+// superseded reports whether an existing container has been replaced by the
+// desired state. Application containers belong to a version. Dependencies have
+// their own lifecycle and are identified by name, so a dependency that is
+// still desired is never superseded, whichever deploy created it.
+func superseded(state runtime.ContainerState, desired planner.DesiredState) bool {
+	if isDependency(state) {
+		return !desiredName(desired, state.Name)
+	}
+	return state.Labels["serve.version"] != desired.Version
+}
+
+func isDependency(state runtime.ContainerState) bool {
+	return state.Labels["serve.container_type"] == "accessory"
+}
+
+func desiredName(desired planner.DesiredState, name string) bool {
+	for _, container := range desired.Containers {
+		if container.Name == name {
+			return true
 		}
 	}
-	if len(publishedRoles) == 0 {
+	return false
+}
+
+// needsExclusiveStart reports whether a candidate cannot run next to the
+// container it replaces: a published host port can only be bound once, and
+// two instances of a stateful dependency must not share a data volume.
+func needsExclusiveStart(container planner.Container) bool {
+	for _, port := range container.Ports {
+		if port.HostPort > 0 {
+			return true
+		}
+	}
+	return container.ContainerType == "accessory" && len(container.Volumes) > 0
+}
+
+// stopExclusivePredecessors stops the running containers that candidates
+// needing an exclusive start replace. The stopped containers are returned so
+// a failed deploy can start them again.
+func (e *Engine) stopExclusivePredecessors(ctx context.Context, desired planner.DesiredState, candidates []planner.Container, existing []runtime.ContainerState) ([]runtime.ContainerState, error) {
+	exclusiveRoles := map[string]bool{}
+	for _, container := range candidates {
+		if needsExclusiveStart(container) {
+			exclusiveRoles[container.Role] = true
+		}
+	}
+	if len(exclusiveRoles) == 0 {
 		return nil, nil
 	}
 
 	var stopped []runtime.ContainerState
 	for _, state := range existing {
-		if !state.Running || state.Labels["serve.version"] == desired.Version || !publishedRoles[state.Labels["serve.role"]] {
+		if !state.Running || !superseded(state, desired) || !exclusiveRoles[state.Labels["serve.role"]] {
 			continue
 		}
 		if err := e.deps.Runtime.StopContainer(ctx, state.ID, stopTimeout); err != nil {
-			return stopped, fmt.Errorf("stop existing published port owner %s: %w", state.Name, err)
+			return stopped, fmt.Errorf("stop previous container %s: %w", state.Name, err)
 		}
 		stopped = append(stopped, state)
 	}
@@ -246,12 +284,22 @@ func markStopped(existing []runtime.ContainerState, stopped []runtime.ContainerS
 	}
 }
 
+// failApply removes the candidates a failed deploy created and restarts the
+// predecessors it stopped. A client that disconnects cancels ctx, so the
+// cleanup runs on its own bounded contexts: otherwise a stopped stateful
+// dependency would stay down. The restart has a separate budget so slow
+// candidate removal cannot use it up.
 func (e *Engine) failApply(ctx context.Context, desired planner.DesiredState, created []planner.Container, stopped []runtime.ContainerState, cause error) error {
-	cleanupErr := e.removeContainers(ctx, desired, created)
+	removeCtx, cancelRemove := context.WithTimeout(context.WithoutCancel(ctx), failureCleanupTimeout)
+	cleanupErr := e.removeContainers(removeCtx, desired, created)
+	cancelRemove()
+
+	restoreCtx, cancelRestore := context.WithTimeout(context.WithoutCancel(ctx), failureCleanupTimeout)
+	defer cancelRestore()
 	var restoreErrors []error
 	for _, state := range stopped {
-		if err := e.deps.Runtime.StartContainer(ctx, state.ID); err != nil {
-			restoreErrors = append(restoreErrors, fmt.Errorf("restart previous published port owner %s: %w", state.Name, err))
+		if err := e.deps.Runtime.StartContainer(restoreCtx, state.ID); err != nil {
+			restoreErrors = append(restoreErrors, fmt.Errorf("restart previous container %s: %w", state.Name, err))
 		}
 	}
 	return errors.Join(cause, cleanupErr, errors.Join(restoreErrors...))
@@ -339,7 +387,7 @@ func (e *Engine) validateAliasOwnership(ctx context.Context, desired planner.Des
 
 func (e *Engine) deactivateOldAliases(ctx context.Context, desired planner.DesiredState, existing []runtime.ContainerState) error {
 	for _, state := range existing {
-		if !state.Running || state.Labels["serve.version"] == desired.Version || state.Network == "" || len(state.Aliases) == 0 {
+		if !state.Running || !superseded(state, desired) || state.Network == "" || len(state.Aliases) == 0 {
 			continue
 		}
 		if err := e.deps.Runtime.ReplaceNetworkAliases(ctx, state.ID, state.Network, nil); err != nil {
@@ -510,31 +558,64 @@ func (e *Engine) removeContainers(ctx context.Context, desired planner.DesiredSt
 	return errors.Join(errs...)
 }
 
-// retireOldVersions stops containers from versions other than the desired
-// one and prunes retained versions beyond retain_containers (which counts
-// the current version).
+// retireOldVersions stops the containers the desired state supersedes and
+// prunes them beyond retain_containers (which counts the current one).
+// Application containers are retained per version. Dependencies are retained
+// per dependency, counting its earlier specs.
 func (e *Engine) retireOldVersions(ctx context.Context, desired planner.DesiredState, existing []runtime.ContainerState) error {
-	byVersion := map[string][]runtime.ContainerState{}
+	groups := map[string][]runtime.ContainerState{}
 	for _, state := range existing {
+		if isDependency(state) {
+			if superseded(state, desired) {
+				groups["dependency:"+state.Labels["serve.role"]] = append(groups["dependency:"+state.Labels["serve.role"]], state)
+			}
+			continue
+		}
 		version := state.Labels["serve.version"]
 		if version == "" || version == desired.Version {
 			continue
 		}
-		byVersion[version] = append(byVersion[version], state)
-	}
-	if len(byVersion) == 0 {
-		return nil
+		groups["version"] = append(groups["version"], state)
 	}
 
-	versions := make([]string, 0, len(byVersion))
-	for version := range byVersion {
-		versions = append(versions, version)
+	scopes := make([]string, 0, len(groups))
+	for scope := range groups {
+		scopes = append(scopes, scope)
 	}
-	sort.Slice(versions, func(i, j int) bool {
-		newestI := newestCreation(byVersion[versions[i]])
-		newestJ := newestCreation(byVersion[versions[j]])
+	sort.Strings(scopes)
+	for _, scope := range scopes {
+		generation := func(state runtime.ContainerState) string { return state.Name }
+		if scope == "version" {
+			generation = func(state runtime.ContainerState) string { return state.Labels["serve.version"] }
+		}
+		if err := e.retire(ctx, desired, groups[scope], generation); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// retire stops every given container and removes those whose generation is
+// not among the newest retained ones. A retained dependency also loses its
+// Docker restart policy: Docker restarts a stopped "always" container when
+// the daemon restarts, which would run it next to its replacement on the same
+// volume or host port. Reactivating a retained spec recreates its container,
+// which restores the configured policy.
+func (e *Engine) retire(ctx context.Context, desired planner.DesiredState, states []runtime.ContainerState, generation func(runtime.ContainerState) string) error {
+	byGeneration := map[string][]runtime.ContainerState{}
+	for _, state := range states {
+		byGeneration[generation(state)] = append(byGeneration[generation(state)], state)
+	}
+
+	generations := make([]string, 0, len(byGeneration))
+	for name := range byGeneration {
+		generations = append(generations, name)
+	}
+	sort.Slice(generations, func(i, j int) bool {
+		newestI := newestCreation(byGeneration[generations[i]])
+		newestJ := newestCreation(byGeneration[generations[j]])
 		if newestI.Equal(newestJ) {
-			return versions[i] > versions[j]
+			return generations[i] > generations[j]
 		}
 		return newestI.After(newestJ)
 	})
@@ -544,8 +625,8 @@ func (e *Engine) retireOldVersions(ctx context.Context, desired planner.DesiredS
 		keepOld = 0
 	}
 
-	for index, version := range versions {
-		for _, state := range byVersion[version] {
+	for index, name := range generations {
+		for _, state := range byGeneration[name] {
 			if state.Running {
 				if err := e.deps.Runtime.StopContainer(ctx, state.ID, stopTimeout); err != nil {
 					return err
@@ -554,6 +635,12 @@ func (e *Engine) retireOldVersions(ctx context.Context, desired planner.DesiredS
 			if index >= keepOld {
 				if err := e.deps.Runtime.RemoveContainer(ctx, state.ID); err != nil {
 					return err
+				}
+				continue
+			}
+			if isDependency(state) && state.Restart.Policy != "" && state.Restart.Policy != "no" {
+				if err := e.deps.Runtime.SetRestartPolicy(ctx, state.ID, runtime.RestartPolicy{Policy: "no"}); err != nil {
+					return fmt.Errorf("disable restart policy of retained container %s: %w", state.Name, err)
 				}
 			}
 		}

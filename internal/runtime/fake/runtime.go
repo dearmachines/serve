@@ -130,6 +130,22 @@ func (r *Runtime) StopContainer(ctx context.Context, id runtime.ContainerID, tim
 	return nil
 }
 
+func (r *Runtime) SetRestartPolicy(ctx context.Context, id runtime.ContainerID, policy runtime.RestartPolicy) error {
+	_ = ctx
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	state, ok := r.containers[id]
+	if !ok {
+		return fmt.Errorf("container not found: %s", id)
+	}
+	state.Restart = policy
+	r.operations = append(r.operations, "set_restart_policy:"+string(id)+":"+policy.Policy)
+	r.containers[id] = state
+	return nil
+}
+
 func (r *Runtime) RemoveContainer(ctx context.Context, id runtime.ContainerID) error {
 	_ = ctx
 
