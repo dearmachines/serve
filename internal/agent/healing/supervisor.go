@@ -39,6 +39,7 @@ type LifecycleEvent struct {
 	Role        string
 	Version     string
 	Container   string
+	Image       string
 	ExitCode    int
 	OOMKilled   bool
 	Attempt     int

@@ -29,6 +29,9 @@ type Runtime interface {
 	StartContainer(ctx context.Context, id ContainerID) error
 	StopContainer(ctx context.Context, id ContainerID, timeout time.Duration) error
 	RemoveContainer(ctx context.Context, id ContainerID) error
+	// RemoveImage removes an image reference without forcing. An image that
+	// any container still uses, or that is already absent, is not an error.
+	RemoveImage(ctx context.Context, image string) error
 	InspectContainer(ctx context.Context, id ContainerID) (ContainerState, error)
 	ListContainers(ctx context.Context, filters ContainerFilters) ([]ContainerState, error)
 	Logs(ctx context.Context, id ContainerID, opts LogOptions) (io.ReadCloser, error)

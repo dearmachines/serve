@@ -122,6 +122,28 @@ func (r *Runtime) RemoveContainer(ctx context.Context, id runtime.ContainerID) e
 	return err
 }
 
+// RemoveImage removes one image reference without forcing. Docker refuses to
+// delete an image a container uses, but it still untags a reference when the
+// image has another tag, which would leave a retained container's reference
+// unresolvable offline. Skip any reference a container, running or stopped,
+// was created from.
+func (r *Runtime) RemoveImage(ctx context.Context, imageRef string) error {
+	containers, err := r.client.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return err
+	}
+	for _, listed := range containers {
+		if listed.Image == imageRef {
+			return nil
+		}
+	}
+	_, err = r.client.ImageRemove(ctx, imageRef, image.RemoveOptions{PruneChildren: true})
+	if errdefs.IsNotFound(err) || errdefs.IsConflict(err) {
+		return nil
+	}
+	return err
+}
+
 func (r *Runtime) InspectContainer(ctx context.Context, id runtime.ContainerID) (runtime.ContainerState, error) {
 	inspect, err := r.client.ContainerInspect(ctx, string(id))
 	if err != nil {

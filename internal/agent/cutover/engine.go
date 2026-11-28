@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/uptimenine/serve/internal/agent/healing"
 	"github.com/uptimenine/serve/internal/agent/health"
 	"github.com/uptimenine/serve/internal/agent/proxy"
 	"github.com/uptimenine/serve/internal/agent/reconciler"
@@ -47,7 +48,10 @@ type Deps struct {
 	Health   health.Checker
 	Proxy    proxy.Manager
 	LastGood LastGoodStore
-	Sleeper  Sleeper
+	// Events receives warnings that must not fail a committed deploy, such
+	// as an old image that could not be removed. Optional.
+	Events  healing.EventSink
+	Sleeper Sleeper
 }
 
 // Engine performs a blue-green deploy: it boots the candidate version next
@@ -544,6 +548,7 @@ func (e *Engine) retireOldVersions(ctx context.Context, desired planner.DesiredS
 		keepOld = 0
 	}
 
+	var removedImages []string
 	for index, version := range versions {
 		for _, state := range byVersion[version] {
 			if state.Running {
@@ -555,10 +560,35 @@ func (e *Engine) retireOldVersions(ctx context.Context, desired planner.DesiredS
 				if err := e.deps.Runtime.RemoveContainer(ctx, state.ID); err != nil {
 					return err
 				}
+				removedImages = append(removedImages, state.Image)
 			}
 		}
 	}
+	e.removeImages(ctx, desired, removedImages)
 	return nil
+}
+
+// removeImages deletes the images of removed containers so retired releases
+// do not fill the host's disk. The runtime keeps an image that any container
+// still uses, which protects retained versions and shared dependency images.
+// The deploy is already committed, so a failure is reported, not returned.
+func (e *Engine) removeImages(ctx context.Context, desired planner.DesiredState, images []string) {
+	seen := map[string]bool{}
+	for _, image := range images {
+		if image == "" || seen[image] {
+			continue
+		}
+		seen[image] = true
+		if err := e.deps.Runtime.RemoveImage(ctx, image); err != nil && e.deps.Events != nil {
+			_ = e.deps.Events.Emit(ctx, healing.LifecycleEvent{
+				Name:        "image_removal_failed",
+				Service:     desired.Service,
+				Destination: desired.Destination,
+				Version:     desired.Version,
+				Image:       image,
+			})
+		}
+	}
 }
 
 func newestCreation(states []runtime.ContainerState) time.Time {
