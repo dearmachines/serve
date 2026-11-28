@@ -16,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
+
 	"github.com/uptimenine/serve/internal/runtime"
 	dockerruntime "github.com/uptimenine/serve/internal/runtime/docker"
 )
@@ -595,5 +598,54 @@ func removeNetwork(t *testing.T, rt *dockerruntime.Runtime, name string) {
 	defer cancel()
 	if err := rt.RemoveNetwork(ctx, name); err != nil && !strings.Contains(err.Error(), "not found") {
 		t.Logf("remove network %s: %v", name, err)
+	}
+}
+
+func TestDockerRuntimeRemoveImageKeepsImagesInUse(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rt := newDockerRuntime(t)
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		t.Fatalf("docker client: %v", err)
+	}
+	defer cli.Close()
+
+	if err := rt.PullImage(ctx, testImage); err != nil {
+		t.Fatalf("pull image: %v", err)
+	}
+	ref := "serve-integration-remove-image:" + strings.ToLower(fmt.Sprintf("%d", time.Now().UnixNano()))
+	if err := cli.ImageTag(ctx, testImage, ref); err != nil {
+		t.Fatalf("tag image: %v", err)
+	}
+	id, err := rt.CreateContainer(ctx, runtime.ContainerSpec{
+		Name:    testContainerName(t, "remove-image"),
+		Image:   ref,
+		Command: []string{"true"},
+		Labels:  map[string]string{"serve.integration_test": t.Name()},
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+
+	if err := rt.RemoveImage(ctx, ref); err != nil {
+		t.Fatalf("removing an image a stopped container uses must not fail: %v", err)
+	}
+	if _, err := cli.ImageInspect(ctx, ref); err != nil {
+		t.Fatalf("image used by a stopped container was removed: %v", err)
+	}
+
+	removeContainer(t, rt, id)
+	if err := rt.RemoveImage(ctx, ref); err != nil {
+		t.Fatalf("remove unused image: %v", err)
+	}
+	if _, err := cli.ImageInspect(ctx, ref); !errdefs.IsNotFound(err) {
+		t.Fatalf("unused image must be removed, inspect returned %v", err)
+	}
+	if _, err := cli.ImageInspect(ctx, testImage); err != nil {
+		t.Fatalf("removing one reference must keep the image's other tags: %v", err)
+	}
+	if err := rt.RemoveImage(ctx, ref); err != nil {
+		t.Fatalf("removing an absent image must not fail: %v", err)
 	}
 }

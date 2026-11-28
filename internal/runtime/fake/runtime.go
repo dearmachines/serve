@@ -13,18 +13,20 @@ import (
 )
 
 type Runtime struct {
-	mu          sync.Mutex
-	nextID      int
-	containers  map[runtime.ContainerID]runtime.ContainerState
-	specs       map[string]runtime.ContainerSpec
-	logs        map[runtime.ContainerID]string
-	subscribers []chan runtime.RuntimeEvent
-	networks    map[string]runtime.NetworkSpec
-	operations  []string
-	execResults map[string]execResult
-	baseTime    time.Time
-	defaultIP   string
-	pullErr     error
+	mu           sync.Mutex
+	nextID       int
+	containers   map[runtime.ContainerID]runtime.ContainerState
+	specs        map[string]runtime.ContainerSpec
+	logs         map[runtime.ContainerID]string
+	subscribers  []chan runtime.RuntimeEvent
+	networks     map[string]runtime.NetworkSpec
+	operations   []string
+	execResults  map[string]execResult
+	baseTime     time.Time
+	defaultIP    string
+	pullErr      error
+	images       map[string]bool
+	removeImgErr error
 }
 
 type execResult struct {
@@ -39,6 +41,7 @@ func NewRuntime() *Runtime {
 		logs:        map[runtime.ContainerID]string{},
 		networks:    map[string]runtime.NetworkSpec{},
 		execResults: map[string]execResult{},
+		images:      map[string]bool{},
 		baseTime:    time.Now(),
 	}
 }
@@ -53,7 +56,51 @@ func (r *Runtime) PullImage(ctx context.Context, image string) error {
 		return r.pullErr
 	}
 	r.operations = append(r.operations, "pull_image:"+image)
+	r.images[image] = true
 	return nil
+}
+
+// RemoveImage mirrors Docker's unforced removal: an image that a container
+// still uses stays, and an absent image is not an error.
+func (r *Runtime) RemoveImage(ctx context.Context, image string) error {
+	_ = ctx
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.removeImgErr != nil {
+		return r.removeImgErr
+	}
+	for _, state := range r.containers {
+		if state.Image == image {
+			return nil
+		}
+	}
+	if !r.images[image] {
+		return nil
+	}
+	r.operations = append(r.operations, "remove_image:"+image)
+	delete(r.images, image)
+	return nil
+}
+
+func (r *Runtime) SetRemoveImageError(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.removeImgErr = err
+}
+
+// Images returns the image references currently present.
+func (r *Runtime) Images() map[string]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	images := make(map[string]bool, len(r.images))
+	for image := range r.images {
+		images[image] = true
+	}
+	return images
 }
 
 func (r *Runtime) SetPullError(err error) {

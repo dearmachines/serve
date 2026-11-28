@@ -31,6 +31,7 @@ type eventLine struct {
 	Destination string `json:"destination,omitempty"`
 	Role        string `json:"role,omitempty"`
 	Container   string `json:"container,omitempty"`
+	Image       string `json:"image,omitempty"`
 	Version     string `json:"version,omitempty"`
 	ExitCode    int    `json:"exit_code"`
 	OOMKilled   bool   `json:"oom_killed"`
@@ -50,6 +51,7 @@ func (s *JSONSink) Emit(ctx context.Context, event healing.LifecycleEvent) error
 		Destination: event.Destination,
 		Role:        event.Role,
 		Container:   event.Container,
+		Image:       event.Image,
 		Version:     event.Version,
 		ExitCode:    event.ExitCode,
 		OOMKilled:   event.OOMKilled,
@@ -66,7 +68,7 @@ func level(event string) string {
 	switch event {
 	case "restart_loop_detected", "rollback_failed":
 		return "error"
-	case "container_exited", "container_restarted", "container_recreated", "container_unhealthy", "container_oom_killed":
+	case "image_removal_failed", "container_exited", "container_restarted", "container_recreated", "container_unhealthy", "container_oom_killed":
 		return "warn"
 	default:
 		return "info"

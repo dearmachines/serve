@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/uptimenine/serve/internal/agent/cutover"
+	"github.com/uptimenine/serve/internal/agent/healing"
 	"github.com/uptimenine/serve/internal/agent/health"
 	fakehealth "github.com/uptimenine/serve/internal/agent/health/fake"
 	fakeproxy "github.com/uptimenine/serve/internal/agent/proxy/fake"
@@ -610,6 +611,82 @@ func TestRetentionKeepsOnlyConfiguredVersions(t *testing.T) {
 			t.Fatalf("version %s must be pruned per retain_containers, got %+v", version, stale)
 		}
 	}
+}
+
+func TestRetentionRemovesImagesOfPrunedVersions(t *testing.T) {
+	env := newEnv(t)
+
+	for _, version := range []string{"v1", "v2", "v3", "v4"} {
+		desired := desiredState(version, 1, false)
+		desired.RetainContainers = 2
+		env.deploy(t, desired)
+	}
+
+	images := env.rt.Images()
+	for _, kept := range []string{"ghcr.io/acme/my-app:v3", "ghcr.io/acme/my-app:v4"} {
+		if !images[kept] {
+			t.Fatalf("image %s of a retained version was removed: %v", kept, images)
+		}
+	}
+	for _, pruned := range []string{"ghcr.io/acme/my-app:v1", "ghcr.io/acme/my-app:v2"} {
+		if images[pruned] {
+			t.Fatalf("image %s of a pruned version was kept: %v", pruned, images)
+		}
+	}
+}
+
+func TestRetentionKeepsImagesStillUsedByOtherContainers(t *testing.T) {
+	env := newEnv(t)
+
+	for _, version := range []string{"v1", "v2", "v3"} {
+		desired := desiredState(version, 1, false)
+		desired.RetainContainers = 1
+		desired.Containers = append(desired.Containers, publishedDependency("redis", version))
+		env.deploy(t, desired)
+	}
+
+	if !env.rt.Images()["redis:8-alpine"] {
+		t.Fatalf("image shared with the current version was removed: %v", env.rt.Images())
+	}
+}
+
+func TestImageRemovalFailureDoesNotFailDeploy(t *testing.T) {
+	env := newEnv(t)
+	sink := &recordingSink{}
+	engine := cutover.New(cutover.Deps{
+		Runtime:  env.rt,
+		Starter:  reconciler.New(env.rt),
+		Health:   env.checker,
+		Proxy:    env.proxy,
+		LastGood: env.store,
+		Events:   sink,
+		Sleeper:  noopSleeper{},
+	})
+	env.engine = engine
+
+	first := desiredState("v1", 1, false)
+	first.RetainContainers = 1
+	env.deploy(t, first)
+	env.rt.SetRemoveImageError(errors.New("disk busy"))
+	second := desiredState("v2", 1, false)
+	second.RetainContainers = 1
+	env.deploy(t, second)
+
+	if stale := env.containersByVersion(t, "v1"); len(stale) != 0 {
+		t.Fatalf("retired containers must still be removed, got %+v", stale)
+	}
+	if len(sink.events) != 1 || sink.events[0].Name != "image_removal_failed" || sink.events[0].Image != "ghcr.io/acme/my-app:v1" {
+		t.Fatalf("expected one image_removal_failed event, got %+v", sink.events)
+	}
+}
+
+type recordingSink struct {
+	events []healing.LifecycleEvent
+}
+
+func (s *recordingSink) Emit(_ context.Context, event healing.LifecycleEvent) error {
+	s.events = append(s.events, event)
+	return nil
 }
 
 func TestCandidateBecomesHealthyAfterPolling(t *testing.T) {

@@ -124,6 +124,7 @@ func New(cfg Config) *Daemon {
 		Health:   cfg.HealthChecker,
 		Proxy:    cfg.ProxyManager,
 		LastGood: store,
+		Events:   cfg.EventSink,
 	})
 	supervisor := healing.NewSupervisor(cfg.Runtime,
 		healing.WithReconciler(starter),

@@ -177,6 +177,7 @@ func (d *Daemon) handleRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	removed := 0
+	var removedImages []string
 	for _, c := range containers {
 		if c.Labels["serve.container_type"] == "proxy" {
 			continue
@@ -191,8 +192,10 @@ func (d *Daemon) handleRemove(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		removedImages = append(removedImages, c.Image)
 		removed++
 	}
+	d.removeImages(r.Context(), removedImages)
 	states, err := d.store.ListDesired()
 	if err != nil {
 		maintenanceRefreshError(w, "Removed", removed, err)
@@ -323,6 +326,7 @@ func (d *Daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	count := 0
+	var prunedImages []string
 	for _, c := range containers {
 		if c.Running || c.Labels["serve.container_type"] == "proxy" || active[c.Name] {
 			continue
@@ -331,8 +335,10 @@ func (d *Daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		prunedImages = append(prunedImages, c.Image)
 		count++
 	}
+	d.removeImages(r.Context(), prunedImages)
 	for _, desired := range states {
 		actual, err := d.actualState(r.Context(), desired.Service, desired.Destination)
 		if err == nil {
@@ -345,6 +351,23 @@ func (d *Daemon) handlePrune(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Fprintf(w, "Pruned %d container(s)\n", count)
 }
+
+// removeImages deletes the images of removed containers. The runtime keeps an
+// image that any container still uses; a failure is reported as an event and
+// does not fail the operation, whose containers are already gone.
+func (d *Daemon) removeImages(ctx context.Context, images []string) {
+	seen := map[string]bool{}
+	for _, image := range images {
+		if image == "" || seen[image] {
+			continue
+		}
+		seen[image] = true
+		if err := d.runtime.RemoveImage(ctx, image); err != nil {
+			_ = d.eventSink.Emit(ctx, healing.LifecycleEvent{Name: "image_removal_failed", Image: image})
+		}
+	}
+}
+
 func maintenanceRefreshError(w http.ResponseWriter, verb string, count int, err error) {
 	http.Error(w, fmt.Sprintf("%s %d container(s); failed to refresh actual state: %v. Retry the operation to finish the refresh.", verb, count, err), http.StatusInternalServerError)
 }

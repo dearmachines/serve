@@ -56,6 +56,31 @@ func TestPruneRefreshesActualStateWithoutLosingRollback(t *testing.T) {
 	}
 }
 
+func TestPruneAndRemoveDeleteImagesNoContainerUses(t *testing.T) {
+	rt := fake.NewRuntime()
+	d := New(Config{Runtime: rt, StateDir: t.TempDir(), ProxyManager: fakeproxy.NewManager(), HealthChecker: &reconcileGate{}})
+	putSerial(t, d, serialDesired("app", "v1"))
+	putSerial(t, d, serialDesired("app", "v2"))
+
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, httptest.NewRequest("POST", "/v1/prune", bytes.NewBufferString(`{"force":true}`)))
+	if w.Code != 200 {
+		t.Fatalf("prune: %d %s", w.Code, w.Body)
+	}
+	if images := rt.Images(); images["app:v1"] || !images["app:v2"] {
+		t.Fatalf("prune must delete only the pruned container's image, got %v", images)
+	}
+
+	w = httptest.NewRecorder()
+	d.handler().ServeHTTP(w, httptest.NewRequest("POST", "/v1/remove", bytes.NewBufferString(`{"force":true,"service":"app","destination":"production"}`)))
+	if w.Code != 200 {
+		t.Fatalf("remove: %d %s", w.Code, w.Body)
+	}
+	if images := rt.Images(); images["app:v2"] {
+		t.Fatalf("remove must delete the removed workload's image, got %v", images)
+	}
+}
+
 func TestPruneRejectsUnsupportedSelection(t *testing.T) {
 	d := New(Config{Runtime: fake.NewRuntime(), StateDir: t.TempDir()})
 	w := httptest.NewRecorder()

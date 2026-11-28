@@ -101,7 +101,7 @@ serve deploy --config serve.yml --version v1.2.3
 
 If `image` has no tag, Serve appends the value passed to `--version`. The example above deploys `ghcr.io/acme/my-app:v1.2.3`.
 
-Serve starts the new containers, waits for their health checks, switches proxy traffic, and then retires the previous containers according to `retain_containers`.
+Serve starts the new containers, waits for their health checks, switches proxy traffic, and then retires the previous containers according to `retain_containers`. When it removes a retired container, it also removes that container's image unless another container, running or stopped, was created from the same reference, so old release images do not fill the host's disk; `serve prune` and `serve remove` do the same. A failed image removal does not fail the deploy: the agent reports it as an `image_removal_failed` event. Images left behind by Serve versions before this change are not removed; delete them once with `docker image prune --all`.
 
 ## Local operation uses the agent too
 
@@ -145,7 +145,7 @@ Stream Docker events from a host:
 serve events --host deploy@example.com
 ```
 
-`serve rollback --service SERVICE --destination DEST` uses the agent's last-good state. `serve remove --force` also removes matching desired workloads, preventing automatic recreation; `serve prune --force` removes stopped containers that are no longer desired. Both preserve the shared proxy and volume data. These commands target the local agent; run them on the host or over SSH.
+`serve rollback --service SERVICE --destination DEST` uses the agent's last-good state. `serve remove --force` also removes matching desired workloads, preventing automatic recreation; `serve prune --force` removes stopped containers that are no longer desired, and their images. Both preserve the shared proxy and volume data. These commands target the local agent; run them on the host or over SSH.
 
 Run `serve --help` for the complete command list.
 
